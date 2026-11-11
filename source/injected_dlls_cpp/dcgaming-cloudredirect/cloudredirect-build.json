@@ -1,0 +1,65 @@
+{
+    "schemaVersion":  1,
+    "upstreamRepository":  "https://github.com/crghofficial/cloudredirect.git",
+    "upstreamCommit":  "4e81e492e4678c1d907fbeaef2625846f6afaad8",
+    "appliedPatches":  [
+                           {
+                               "commit":  "255dc01e7f3ca209dabff8d32789e5d4ba779d1f",
+                               "reviewUrl":  "https://github.com/crghofficial/cloudredirect/pull/2",
+                               "relativePath":  "dcgaming-build/cloudredirect-steam-compatibility.patch",
+                               "sha256":  "463F5DF658E739833D5A308388D37303EB7D13048380466385EEA38B18CF61E8"
+                           }
+                       ],
+    "cloudRedirectVersion":  "2.6.6",
+    "configuration":  "Release",
+    "architecture":  "x64",
+    "target":  "cloud_redirect",
+    "sourceSnapshotSha256":  "023DC1D6BD205345575D80E1066192B9B7090B8D1F8979A4917C281E1618D611",
+    "toolchain":  {
+                      "compiler":  "clang version 22.1.8 (https://github.com/llvm/llvm-project.git ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)",
+                      "compilerSha256":  "A8B7A614EEADD9105F814BE3701A7F312CDA4CEA51751B75B408C16100C94E85",
+                      "cmakeSha256":  "3C05DE86FBC0EC0610BBEE201588E4FC1017347EC61B0F8080981FC6BFE93681",
+                      "ninjaSha256":  "68865C3276D449D746CEA5065FDEC2BAF755D7813E161AB04205B0907B2629B8"
+                  },
+    "configureArguments":  [
+                               "-S",
+                               "C:\\DUNGDEV\\DC\\DC-Gaming\\DC-Gaming\\DC-Gaming\\.artifacts\\cloudredirect-20261109\\native\\source",
+                               "-B",
+                               "C:\\DUNGDEV\\DC\\DC-Gaming\\DC-Gaming\\DC-Gaming\\.artifacts\\cloudredirect-20261109\\native\\build",
+                               "-G",
+                               "Ninja",
+                               "-DCMAKE_MAKE_PROGRAM=C:\\DUNGDEV\\nestg-launcher\\launcher\\.codex-temp\\cloudredirect-upgrade-e716bf7f3cc14e76ad69a550b3baf78d\\toolchain\\ninja\\ninja.exe",
+                               "-DCMAKE_C_COMPILER=C:/DUNGDEV/nestg-launcher/launcher/.codex-temp/cloudredirect-upgrade-e716bf7f3cc14e76ad69a550b3baf78d/toolchain/llvm-mingw/llvm-mingw-20260616-ucrt-x86_64/bin/clang.exe",
+                               "-DCMAKE_CXX_COMPILER=C:/DUNGDEV/nestg-launcher/launcher/.codex-temp/cloudredirect-upgrade-e716bf7f3cc14e76ad69a550b3baf78d/toolchain/llvm-mingw/llvm-mingw-20260616-ucrt-x86_64/bin/clang++.exe",
+                               "-DCMAKE_BUILD_TYPE=Release",
+                               "-DCR_GIT_SHA=4e81e49-dcsteam-255dc01",
+                               "-DCMAKE_CXX_FLAGS=-fms-extensions -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -include \"C:/DUNGDEV/DC/DC-Gaming/DC-Gaming/DC-Gaming/.artifacts/cloudredirect-20261109/native/source/dcgaming-build/CloudRedirectMingw.h\"",
+                               "-DCMAKE_C_FLAGS=-D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00",
+                               "-DCMAKE_SHARED_LINKER_FLAGS=-static",
+                               "-DCMAKE_EXE_LINKER_FLAGS=-static"
+                           ],
+    "dll":  {
+                "relativePath":  "cloud_redirect.dll",
+                "sha256":  "88F62F604CA27F981DC25EAA6EAEA1A791D796D936135F83F79800E943B47F3A",
+                "size":  4152832
+            },
+    "sourceArchive":  {
+                          "relativePath":  "CloudRedirect-2.6.6-4e81e49-source.zip",
+                          "sha256":  "5B423515F80DA4E97EB1943AB2102B11F1C039D129D77021970EEE7DF3CA6D4B",
+                          "size":  1067861
+                      },
+    "portabilityFiles":  [
+                             {
+                                 "relativePath":  "dcgaming-build/CloudRedirectMingw.h",
+                                 "sha256":  "1C158A8B09590979E7E4F5B560F5D60AED1086255B2CBAABF62C32075E59BFE6"
+                             },
+                             {
+                                 "relativePath":  "dcgaming-build/cloudredirect-clang-portability.patch",
+                                 "sha256":  "0ABBC8A4297A80962B3FEBDBE7717BF78A2F57D28E9A2E112B7A6A1F2A0BF53A"
+                             }
+                         ],
+    "tests":  {
+                  "pendingOpsJournalPassed":  true
+              },
+    "realSteamTested":  false
+}

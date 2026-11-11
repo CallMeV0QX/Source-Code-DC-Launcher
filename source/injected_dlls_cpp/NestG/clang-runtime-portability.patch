@@ -1,0 +1,96 @@
+diff --git a/src/NestG/RentalRuntime.cpp b/src/NestG/RentalRuntime.cpp
+--- a/src/NestG/RentalRuntime.cpp
++++ b/src/NestG/RentalRuntime.cpp
+@@ -49,14 +49,16 @@ struct RuntimeState {
+     std::mutex changes;
+     std::vector<uint32_t> additions, removals;
+     std::set<uint32_t> everTracked;
+-    std::atomic<std::shared_ptr<const Snapshot>> active;
++    // Standard shared_ptr atomic operations retain sequential consistency on
++    // libc++ implementations without atomic<shared_ptr<T>> specialization.
++    std::shared_ptr<const Snapshot> active;
+     std::atomic<bool> started{false};
+     bool readAdapterReady = false;
+     struct InactiveLease {
+         uint64_t steamId = 0, generation = 0;
+         std::string rentalId, steamAccountId, installationId, grantId, revision, status;
+     };
+-    std::atomic<std::shared_ptr<const InactiveLease>> inactive;
++    std::shared_ptr<const InactiveLease> inactive;
+     struct ReadHandle { uint64_t steamId, generation, deadline; std::string rentalId, grantId, revision; };
+     std::mutex handlesMutex;
+     std::unordered_map<HANDLE, ReadHandle> readHandles;
+@@ -303,7 +305,7 @@ std::string Verified(const Control& control, const InventoryFile& item) {
+ void Publish(std::shared_ptr<const Snapshot> next) {
+     {
+         std::lock_guard lock(state.changes);
+-        auto old = state.active.exchange(next);
++        auto old = std::atomic_exchange(&state.active, next);
+         if (!old && !next) return;
+         if (old) for (const auto& [id, key] : old->data.depotKeys) if (!next || !next->data.depotKeys.count(id)) state.removals.push_back(id);
+         if (next) for (const auto& [id, key] : next->data.depotKeys) {
+@@ -317,9 +319,9 @@ void RevokeLease(const Control& control) {
+     bool changed = false;
+     {
+         std::lock_guard lock(state.changes);
+-        const auto active = state.active.load();
++        const auto active = std::atomic_load(&state.active);
+         if (active && active->rentalId == control.rentalId && active->grantId == control.grantId && active->revision == control.revision) {
+-            state.active.store(std::shared_ptr<const Snapshot>{});
++            std::atomic_store(&state.active, std::shared_ptr<const Snapshot>{});
+             for (const auto& [id, key] : active->data.depotKeys) state.removals.push_back(id);
+             changed = true;
+         }
+@@ -442,7 +444,7 @@ void Run() {
+         try {
+             const auto identity = RentalIdentity::Capture();
+             if (identity.generation != generation) { Publish(nullptr); generation = identity.generation; nextCheck = 0; candidateCursor = 0; }
+-            auto active = state.active.load();
++            auto active = std::atomic_load(&state.active);
+             if (active && (!identity.observerReady || identity.state != RentalIdentity::State::Authenticated || GetTickCount64() >= active->deadlineTicks)) Publish(nullptr);
+             if (state.readAdapterReady && Hooks_Manifest::RentalReadReady() && Hooks_Package::RentalIsolationReady() && identity.observerReady &&
+                 identity.state == RentalIdentity::State::Authenticated && GetTickCount64() >= nextCheck) {
+@@ -482,7 +484,7 @@ void Run() {
+                                 inactive->rentalId = control.rentalId; inactive->steamAccountId = control.steamAccountId;
+                                 inactive->installationId = control.installationId; inactive->grantId = control.grantId;
+                                 inactive->revision = control.revision; inactive->status = status == "expired" ? "expired" : "revoked";
+-                                state.inactive.store(inactive);
++                                std::atomic_store(&state.inactive, std::shared_ptr<const RuntimeState::InactiveLease>(inactive));
+                                 RevokeLease(control); if (status == "expired") Vault(control);
+                             }
+                             else throw std::runtime_error("rental_status");
+@@ -499,14 +501,14 @@ void Guard() {
+     // of registered leases. Getters also validate on every individual read.
+     for (;;) {
+         const auto identity = RentalIdentity::Capture();
+-        const auto snapshot = state.active.load();
++        const auto snapshot = std::atomic_load(&state.active);
+         if (snapshot && (!identity.observerReady || identity.state != RentalIdentity::State::Authenticated ||
+             identity.generation != snapshot->generation || identity.steamId != snapshot->steamId || GetTickCount64() >= snapshot->deadlineTicks ||
+             !SafePath(snapshot->root / L".nestg" / L"grant.dat"))) {
+             auto expected = snapshot;
+             {
+                 std::lock_guard lock(state.changes);
+-                if (state.active.compare_exchange_strong(expected, std::shared_ptr<const Snapshot>{}))
++                if (std::atomic_compare_exchange_strong(&state.active, &expected, std::shared_ptr<const Snapshot>{}))
+                     for (const auto& [id, key] : snapshot->data.depotKeys) state.removals.push_back(id);
+             }
+             if (expected == snapshot) Hooks_Package::RequestRentalRefresh();
+@@ -680,7 +682,7 @@ bool Start(const fs::path& steamRoot) {
+     return true;
+ }
+ std::shared_ptr<const Snapshot> Acquire() {
+-    auto snapshot = state.active.load();
++    auto snapshot = std::atomic_load(&state.active);
+     if (!snapshot || GetTickCount64() >= snapshot->deadlineTicks) return {};
+     const auto identity = RentalIdentity::Capture();
+     if (!identity.observerReady || identity.state != RentalIdentity::State::Authenticated || identity.generation != snapshot->generation || identity.steamId != snapshot->steamId) return {};
+@@ -705,7 +707,7 @@ RentalStatusPipe::Reply CaptureStatus(const RentalStatusPipe::Request& request)
+     }
+     auto snapshot = Acquire();
+     if (!snapshot) {
+-        const auto inactive = state.inactive.load();
++        const auto inactive = std::atomic_load(&state.inactive);
+         if (inactive && inactive->steamId == identity.steamId && inactive->generation == identity.generation &&
+             inactive->rentalId == request.rentalId && inactive->steamAccountId == request.steamAccountId &&
+             inactive->installationId == request.installationId && inactive->grantId == request.grantId && inactive->revision == request.revision)

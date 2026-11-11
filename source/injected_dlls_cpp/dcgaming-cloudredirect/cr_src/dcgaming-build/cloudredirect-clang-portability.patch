@@ -1,0 +1,21 @@
+diff --git a/src/common/legacy_metadata_cleanup.cpp b/src/common/legacy_metadata_cleanup.cpp
+--- a/src/common/legacy_metadata_cleanup.cpp
++++ b/src/common/legacy_metadata_cleanup.cpp
+@@ -352,7 +352,7 @@ SweepStats PruneAutoCloudPollutionRoots(const std::vector<std::string>& roots) {
+ 
+             const bool isReparsePoint =
+ #ifdef _WIN32
+-                fs::is_symlink(symSt) || symSt.type() == fs::file_type::junction;
++                fs::is_symlink(symSt) || FileUtil::IsPathRedirectingReparsePoint(FileUtil::PathToUtf8(canonDir));
+ #else
+                 fs::is_symlink(symSt);
+ #endif
+@@ -379,7 +379,7 @@ SweepStats PruneAutoCloudPollutionRoots(const std::vector<std::string>& roots) {
+                 auto vSt = fs::symlink_status(victim, vEc);
+                 if (vEc || !fs::exists(vSt)) continue;
+ #ifdef _WIN32
+-                if (fs::is_symlink(vSt) || vSt.type() == fs::file_type::junction) continue;
++                if (fs::is_symlink(vSt) || FileUtil::IsPathRedirectingReparsePoint(FileUtil::PathToUtf8(victim))) continue;
+ #else
+                 if (fs::is_symlink(vSt)) continue;
+ #endif

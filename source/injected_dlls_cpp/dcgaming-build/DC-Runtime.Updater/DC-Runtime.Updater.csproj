@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>DCGaming.RuntimeUpdater</AssemblyName>
+    <RootNamespace>DCGaming.RuntimeUpdater</RootNamespace>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <PublishTrimmed>false</PublishTrimmed>
+    <SelfContained Condition="'$(RuntimeIdentifier)' == 'win-x64'">true</SelfContained>
+  </PropertyGroup>
+  <!-- A solution may build both the standalone executable and its library
+       reference concurrently. Keep compiler outputs separate, while sharing
+       the restored project.assets.json under BaseIntermediateOutputPath. -->
+  <PropertyGroup Condition="'$(OutputType)' == 'Library'">
+    <OutputPath Condition="'$(UseArtifactsOutput)' != 'true'">bin\library\$(Configuration)\</OutputPath>
+    <OutputPath Condition="'$(UseArtifactsOutput)' == 'true'">$(ArtifactsPath)\bin\$(MSBuildProjectName)\library\$(Configuration)\$(RuntimeIdentifier)\</OutputPath>
+    <IntermediateOutputPath Condition="'$(UseArtifactsOutput)' != 'true'">$(BaseIntermediateOutputPath)library\$(Configuration)\</IntermediateOutputPath>
+    <IntermediateOutputPath Condition="'$(UseArtifactsOutput)' == 'true'">$(BaseIntermediateOutputPath)library\$(Configuration)\$(RuntimeIdentifier)\</IntermediateOutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <ProjectReference Include="..\DC-Runtime.Core\DC-Runtime.Core.csproj" GlobalPropertiesToRemove="OutputType;UseAppHost;SelfContained;PublishSingleFile" />
+  </ItemGroup>
+</Project>

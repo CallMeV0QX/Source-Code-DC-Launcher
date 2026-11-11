@@ -1,0 +1,31 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -156,3 +156,3 @@
+-set_target_properties(OpenSteamTool PROPERTIES OUTPUT_NAME "NestG")
++set_target_properties(OpenSteamTool PROPERTIES OUTPUT_NAME "OpenSteamTool")
+ 
+ # Header search path — per-config include directory
+diff --git a/src/NestG/ProxyBootstrap.h b/src/NestG/ProxyBootstrap.h
+--- a/src/NestG/ProxyBootstrap.h
++++ b/src/NestG/ProxyBootstrap.h
+@@ -16,9 +16,9 @@
+     DWORD length = GetModuleFileNameW(static_cast<HMODULE>(module), path, ARRAYSIZE(path));
+-    if (!length || length >= ARRAYSIZE(path) - 16) {
++    if (!length || length >= ARRAYSIZE(path) - ARRAYSIZE(L"OpenSteamTool.dll")) {
+         NestGStartup::Write("proxy.path.failed", GetLastError()); return 0;
+     }
+     wchar_t* slash = wcsrchr(path, L'\\');
+     if (!slash) { NestGStartup::Write("proxy.path.failed", ERROR_BAD_PATHNAME); return 0; }
+-    wcscpy_s(slash + 1, ARRAYSIZE(path) - (slash + 1 - path), L"NestG.dll");
++    wcscpy_s(slash + 1, ARRAYSIZE(path) - (slash + 1 - path), L"OpenSteamTool.dll");
+     NestGStartup::Write("proxy.load.begin");
+     HMODULE runtime = LoadLibraryExW(path, nullptr,
+diff --git a/src/dllmain.cpp b/src/dllmain.cpp
+--- a/src/dllmain.cpp
++++ b/src/dllmain.cpp
+@@ -125,3 +125,3 @@
+         OSTPlatform::Thread::StartDetached([] () -> uint32_t {
+-            const std::string self = std::string(SteamInstallPath) + "\\NestG.dll";
++            const std::string self = std::string(SteamInstallPath) + "\\OpenSteamTool.dll";
+             AppUpdater::CleanupStagedBackup(self);

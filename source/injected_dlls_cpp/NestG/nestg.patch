@@ -1,0 +1,203 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 3798ab7..f3be0c7 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -121,9 +121,7 @@ add_library(OpenSteamTool SHARED
+     Utils/SteamMetadata/RemoteToml.cpp
+     Utils/SteamMetadata/StatsClient.cpp
+     Utils/SteamMetadata/SteamDiagnostics.cpp
+-    Utils/Tokeer/TokeerBridge.cpp
+-    Utils/Tokeer/TokeerUri.cpp
+-    Utils/Update/AppUpdater.cpp
++    # NestG distribution does not ship external redemption or self-update entry points.
+ 
+     # Pipe subsystem: generic handshake registry + ProcessInspector core, plus
+     # self-contained features that own their primitives.
+@@ -155,6 +153,8 @@ add_library(OpenSteamTool SHARED
+     "${PROTO_GEN_DIR}/steam_messages.pb.cc"
+ )
+ 
++set_target_properties(OpenSteamTool PROPERTIES OUTPUT_NAME "NestG")
++
+ # Header search path — per-config include directory
+ target_include_directories(OpenSteamTool PRIVATE
+     ${CMAKE_CURRENT_SOURCE_DIR}
+@@ -202,9 +202,9 @@ endif()
+ # This is a compile-time cut, not a runtime setting: with it off, the updater is
+ # not reachable at all and [update] enabled in opensteamtool.toml has no effect.
+ # Use it for private or pinned builds that must not be replaced under the user.
+-option(OST_ENABLE_UPDATER "Compile in the self-updater" ON)
++option(OST_ENABLE_UPDATER "Compile in the self-updater" OFF)
+ if(OST_ENABLE_UPDATER)
+-    target_compile_definitions(OpenSteamTool PRIVATE OST_ENABLE_UPDATER)
++    message(FATAL_ERROR "NestG pinned runtime must not enable the native updater")
+ endif()
+ 
+ # Base URL of the Tokeer code server used by the bst:// bridge (code redemption).
+diff --git a/src/Utils/Config/Config.cpp b/src/Utils/Config/Config.cpp
+index fc84b69..08ab50c 100644
+--- a/src/Utils/Config/Config.cpp
++++ b/src/Utils/Config/Config.cpp
+@@ -291,7 +291,9 @@ namespace {
+ 
+     DonateSettings GetDonateSettings() {
+         std::lock_guard lock(g_mutex);
+-        return donate;
++        auto settings = donate;
++        settings.enabled = false; // NestG never contributes signed-in users' manifest codes.
++        return settings;
+     }
+ 
+     bool GetUpdateEnabled() {
+diff --git a/src/Utils/SteamMetadata/RemoteToml.cpp b/src/Utils/SteamMetadata/RemoteToml.cpp
+index 4411e07..fbac462 100644
+--- a/src/Utils/SteamMetadata/RemoteToml.cpp
++++ b/src/Utils/SteamMetadata/RemoteToml.cpp
+@@ -109,7 +109,9 @@ Result Fetch(const Request& request)
+     }
+ 
+     // 3. Try remote (mirror chain with early-out on 404).
+-    const std::vector<std::string> urlTemplates = BuildUrlTemplates();
++    // Metadata is delivered and hash-pinned by the authenticated NestG bundle.
++    // Only read the exact Steam-build cache; never overwrite it from a remote mirror.
++    const std::vector<std::string> urlTemplates;
+     OSTPlatform::Http::Result http;
+     std::string lastUrl;
+ 
+diff --git a/src/cmake/Detours.cmake b/src/cmake/Detours.cmake
+index 977f5ed..7bd151f 100644
+--- a/src/cmake/Detours.cmake
++++ b/src/cmake/Detours.cmake
+@@ -10,8 +10,7 @@ include(FetchContent)
+ FetchContent_Declare(
+     detours
+     GIT_REPOSITORY https://github.com/microsoft/Detours.git
+-    GIT_TAG        main
+-    GIT_SHALLOW    TRUE
++    GIT_TAG        adb07604aa56508448b95bf037c2a6d0d3b6831a
+     GIT_PROGRESS   TRUE
+     # SOURCE_SUBDIR points at a directory with no CMakeLists.txt so that
+     # FetchContent_MakeAvailable downloads the source but does NOT add the
+diff --git a/src/cmake/Lua.cmake b/src/cmake/Lua.cmake
+index ddb38cd..1c0a3e1 100644
+--- a/src/cmake/Lua.cmake
++++ b/src/cmake/Lua.cmake
+@@ -10,8 +10,9 @@ include(FetchContent)
+ FetchContent_Declare(
+     lua
+     URL https://www.lua.org/ftp/lua-5.5.0.tar.gz
++    URL_HASH SHA256=57ccc32bbbd005cab75bcc52444052535af691789dba2b9016d5c50640d68b3d
+     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+-    TLS_VERIFY OFF
++    TLS_VERIFY ON
+ )
+ FetchContent_MakeAvailable(lua)
+ 
+diff --git a/src/cmake/Protobuf.cmake b/src/cmake/Protobuf.cmake
+index 80637b5..6ab043b 100644
+--- a/src/cmake/Protobuf.cmake
++++ b/src/cmake/Protobuf.cmake
+@@ -22,8 +22,8 @@ set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "" FORCE)
+ FetchContent_Declare(
+     protobuf
+     GIT_REPOSITORY https://github.com/protocolbuffers/protobuf.git
+-    GIT_TAG        v3.15.3
+-    GIT_SHALLOW    TRUE
++    GIT_TAG        983d115bd9f388468fd65d1e623b858eb12bc528
++    GIT_SUBMODULES ""
+     GIT_PROGRESS   TRUE
+     SOURCE_SUBDIR  cmake
+ )
+diff --git a/src/cmake/Spdlog.cmake b/src/cmake/Spdlog.cmake
+index 332cd44..6c12864 100644
+--- a/src/cmake/Spdlog.cmake
++++ b/src/cmake/Spdlog.cmake
+@@ -19,8 +19,7 @@ set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
+ FetchContent_Declare(
+     spdlog
+     GIT_REPOSITORY https://github.com/gabime/spdlog.git
+-    GIT_TAG        v1.17.0
+-    GIT_SHALLOW    TRUE
++    GIT_TAG        79524ddd08a4ec981b7fea76afd08ee05f83755d
+     GIT_PROGRESS   TRUE
+ )
+ FetchContent_MakeAvailable(spdlog)
+diff --git a/src/cmake/Tomlplusplus.cmake b/src/cmake/Tomlplusplus.cmake
+index fd8bd3c..ef9d914 100644
+--- a/src/cmake/Tomlplusplus.cmake
++++ b/src/cmake/Tomlplusplus.cmake
+@@ -10,8 +10,7 @@ include(FetchContent)
+ FetchContent_Declare(
+     tomlplusplus
+     GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+-    GIT_TAG        v3.4.0
+-    GIT_SHALLOW    TRUE
++    GIT_TAG        30172438cee64926dc41fdd9c11fb3ba5b2ba9de
+     GIT_PROGRESS   TRUE
+ )
+ FetchContent_MakeAvailable(tomlplusplus)
+diff --git a/src/dllmain.cpp b/src/dllmain.cpp
+index 7110664..4a82fc6 100644
+--- a/src/dllmain.cpp
++++ b/src/dllmain.cpp
+@@ -8,7 +8,6 @@
+ #include "Utils/SteamMetadata/ManifestDonor.h"
+ #include "Utils/SteamMetadata/PatternLoader.h"
+ #include "Utils/SteamMetadata/SteamDiagnostics.h"
+-#include "Utils/Tokeer/TokeerBridge.h"
+ #ifdef OST_ENABLE_UPDATER
+ #include "Utils/Update/AppUpdater.h"
+ #endif
+@@ -101,7 +100,7 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
+ 
+     // Register the bst:// URI scheme so the website can drive code redemption via this
+     // DLL (rundll32 handler). HKCU, no admin; idempotent.
+-    TokeerBridge::RegisterUriScheme(std::string(SteamInstallPath) + "\\OpenSteamTool.dll");
++    // NestG owns activation; do not register an external redemption protocol.
+ 
+     // Optional self-update check. Runs on its own detached thread so the network
+     // round-trip never delays hook installation; a staged DLL applies next launch.
+@@ -113,7 +112,7 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
+ #ifdef OST_ENABLE_UPDATER
+     if (Config::GetUpdateEnabled()) {
+         OSTPlatform::Thread::StartDetached([] () -> uint32_t {
+-            const std::string self = std::string(SteamInstallPath) + "\\OpenSteamTool.dll";
++            const std::string self = std::string(SteamInstallPath) + "\\NestG.dll";
+             AppUpdater::CleanupStagedBackup(self);
+ 
+             const AppUpdater::CheckResult upd = AppUpdater::Check();
+diff --git a/src/dwmapi/dwmapi.cpp b/src/dwmapi/dwmapi.cpp
+index 1594861..8be60a2 100644
+--- a/src/dwmapi/dwmapi.cpp
++++ b/src/dwmapi/dwmapi.cpp
+@@ -109,7 +109,7 @@
+ #pragma comment(linker, "/EXPORT:#187=DWMAPI.#187,@187,NONAME")
+ 
+ // Only inject when the host process is steam.exe (case-insensitive).
+-// LoadLibraryA itself guarantees that OpenSteamTool.dll's DllMain
++// LoadLibraryA itself guarantees that NestG.dll's DllMain
+ // runs at most once per process, so multiple hijack DLLs can safely
+ // call this without additional synchronisation.
+ BOOL OpenSteamToolLoad()
+@@ -122,7 +122,7 @@ BOOL OpenSteamToolLoad()
+         if (_stricmp(exeName, "steam.exe") != 0)
+             return TRUE;   // not Steam — let the proxy load, but don't inject
+     }
+-    return LoadLibraryA("OpenSteamTool.dll") != NULL;
++    return LoadLibraryA("NestG.dll") != NULL;
+ }
+ 
+ 
+diff --git a/src/xinput1_4/xinput1_4.cpp b/src/xinput1_4/xinput1_4.cpp
+index 1cb6e34..e4847ee 100644
+--- a/src/xinput1_4/xinput1_4.cpp
++++ b/src/xinput1_4/xinput1_4.cpp
+@@ -127,7 +127,7 @@ BOOL OpenSteamToolLoad() {
+         exeName = exeName ? exeName + 1 : exePath;
+         if (_stricmp(exeName, "steam.exe") != 0) return TRUE;
+     }
+-    return LoadLibraryA("OpenSteamTool.dll") != NULL;
++    return LoadLibraryA("NestG.dll") != NULL;
+ }
+ 
+ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved) {

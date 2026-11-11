@@ -1,0 +1,264 @@
+diff --git a/src/Utils/Config/ConfigFileWatcher.cpp b/src/Utils/Config/ConfigFileWatcher.cpp
+index 7058e78..5649100 100644
+--- a/src/Utils/Config/ConfigFileWatcher.cpp
++++ b/src/Utils/Config/ConfigFileWatcher.cpp
+@@ -15,15 +15,25 @@
+ #include <string>
+ #include <string_view>
+ #include <thread>
++#include <mutex>
+ #include <vector>
+ 
+ namespace ConfigFileWatcher {
+ namespace {
+ 
+-std::atomic<bool> g_running{false};
+-std::thread g_watcherThread;
+-std::string g_configPath;
+-std::string g_defaultLuaDir;
++// The DLL is pinned until process termination. Windows terminates the other
++// threads before CRT DLL teardown; destroying a joinable std::thread then calls
++// terminate(), even if its OS thread already exited. Keep the entire watcher
++// state alive until process reclamation. Stop() remains available for live
++// reconfiguration, outside DllMain, and joins before changing watched paths.
++struct WatcherState {
++    std::mutex lifecycle;
++    std::atomic<bool> running{false};
++    std::thread thread;
++    std::string configPath;
++    std::string defaultLuaDir;
++};
++auto& g_state = *new WatcherState;
+ 
+ constexpr uint32_t kDebounceMs = 500;
+ 
+@@ -50,7 +60,7 @@ bool ContainsConfigChange(
+ }
+ 
+ std::vector<std::string> BuildLuaWatchDirs() {
+-    return LuaConfig::MergeWatchDirs(Config::GetLuaPaths(), g_defaultLuaDir);
++    return LuaConfig::MergeWatchDirs(Config::GetLuaPaths(), g_state.defaultLuaDir);
+ }
+ 
+ void RestartLuaWatcher() {
+@@ -77,7 +87,7 @@ constexpr std::string_view kProbeFileName = "manifest_probe.txt";
+ 
+ void ProcessProbeFile() {
+     const std::filesystem::path path =
+-        std::filesystem::path(g_configPath).parent_path() / kProbeFileName;
++        std::filesystem::path(g_state.configPath).parent_path() / kProbeFileName;
+ 
+     std::ifstream in(path);
+     if (!in) return;
+@@ -108,9 +118,9 @@ void ProcessProbeFile() {
+ }
+ 
+ void ReloadConfig() {
+-    LOG_INFO("Reloading config: {}", g_configPath);
++    LOG_INFO("Reloading config: {}", g_state.configPath);
+ 
+-    const Config::LoadResult result = Config::Load(g_configPath);
++    const Config::LoadResult result = Config::Load(g_state.configPath);
+     if (!result.applied) {
+         LOG_WARN("Config reload skipped; keeping previous valid config");
+         return;
+@@ -124,7 +134,7 @@ void ReloadConfig() {
+ }
+ 
+ void WatcherThread() {
+-    const std::filesystem::path configPath(g_configPath);
++    const std::filesystem::path configPath(g_state.configPath);
+     const std::filesystem::path dirPath = configPath.parent_path();
+     const std::string targetFileName = configPath.filename().string();
+ 
+@@ -137,7 +147,7 @@ void WatcherThread() {
+         return;
+     }
+ 
+-    LOG_INFO("Watching config file: {}", g_configPath);
++    LOG_INFO("Watching config file: {}", g_state.configPath);
+ 
+     OSTPlatform::DirectoryWatch::Watch* watchPtr = &watch;
+     std::vector<OSTPlatform::DirectoryWatch::Watch*> watches{watchPtr};
+@@ -155,17 +165,17 @@ void WatcherThread() {
+         return touched;
+     };
+ 
+-    while (g_running) {
++    while (g_state.running) {
+         auto waitResult = OSTPlatform::DirectoryWatch::WaitAny(watches, 1000);
+ 
+-        if (!g_running) break;
++        if (!g_state.running) break;
+         if (waitResult.status == OSTPlatform::DirectoryWatch::WaitStatus::Timeout) continue;
+         if (waitResult.status != OSTPlatform::DirectoryWatch::WaitStatus::Signaled) continue;
+ 
+         Touched touched = drainEvent();
+-        while (g_running) {
++        while (g_state.running) {
+             auto debounceResult = OSTPlatform::DirectoryWatch::WaitAny(watches, kDebounceMs);
+-            if (!g_running) break;
++            if (!g_state.running) break;
+             if (debounceResult.status == OSTPlatform::DirectoryWatch::WaitStatus::Timeout) break;
+             if (debounceResult.status != OSTPlatform::DirectoryWatch::WaitStatus::Signaled) break;
+             const Touched more = drainEvent();
+@@ -188,21 +198,27 @@ void WatcherThread() {
+ } // namespace
+ 
+ void Start(const std::string& configPath, const std::string& defaultLuaDir) {
+-    if (g_running.exchange(true)) {
++    std::lock_guard lock(g_state.lifecycle);
++    if (g_state.running.exchange(true)) {
+         LOG_WARN("Config watcher already running");
+         return;
+     }
+ 
+-    g_configPath = configPath;
+-    g_defaultLuaDir = defaultLuaDir;
+-    g_watcherThread = std::thread(WatcherThread);
++    g_state.configPath = configPath;
++    g_state.defaultLuaDir = defaultLuaDir;
++    try {
++        g_state.thread = std::thread(WatcherThread);
++    } catch (...) {
++        g_state.running = false;
++        throw;
++    }
+ }
+ 
+ void Stop() {
+-    if (!g_running) return;
+-    g_running = false;
+-    if (g_watcherThread.joinable()) {
+-        g_watcherThread.join();
++    std::lock_guard lock(g_state.lifecycle);
++    g_state.running = false;
++    if (g_state.thread.joinable()) {
++        g_state.thread.join();
+     }
+ }
+ 
+diff --git a/src/Utils/Config/LuaFileWatcher.cpp b/src/Utils/Config/LuaFileWatcher.cpp
+index c28c76f..07cf3ec 100644
+--- a/src/Utils/Config/LuaFileWatcher.cpp
++++ b/src/Utils/Config/LuaFileWatcher.cpp
+@@ -9,6 +9,7 @@
+ #include <atomic>
+ #include <cctype>
+ #include <thread>
++#include <mutex>
+ #include <unordered_map>
+ 
+ namespace LuaFileWatcher {
+@@ -25,9 +26,18 @@ struct FileChange {
+     ChangeAction action = ChangeAction::Modified;
+ };
+ 
+-std::atomic<bool> g_running{false};
+-std::thread g_watcherThread;
+-std::vector<std::string> g_watchDirs;
++// The DLL is pinned until process termination. Windows terminates the other
++// threads before CRT DLL teardown; destroying a joinable std::thread then calls
++// terminate(), even if its OS thread already exited. Keep the entire watcher
++// state alive until process reclamation. Stop() remains available for live
++// reconfiguration, outside DllMain, and joins before changing watched paths.
++struct WatcherState {
++    std::mutex lifecycle;
++    std::atomic<bool> running{false};
++    std::thread thread;
++    std::vector<std::string> watchDirs;
++};
++auto& g_state = *new WatcherState;
+ 
+ constexpr uint32_t kDebounceMs = 500;
+ 
+@@ -121,13 +131,13 @@ void ProcessChanges(const std::vector<FileChange>& changes) {
+ }
+ 
+ void WatcherThread() {
+-    const size_t numDirs = g_watchDirs.size();
++    const size_t numDirs = g_state.watchDirs.size();
+     std::vector<OSTPlatform::DirectoryWatch::Watch> watches(numDirs);
+     std::vector<OSTPlatform::DirectoryWatch::Watch*> watchPtrs(numDirs, nullptr);
+ 
+     for (size_t i = 0; i < numDirs; ++i) {
+-        if (!watches[i].Open(g_watchDirs[i], 65536)) {
+-            LOG_PACKAGE_WARN("Failed to open Lua watch directory: {}", g_watchDirs[i]);
++        if (!watches[i].Open(g_state.watchDirs[i], 65536)) {
++            LOG_PACKAGE_WARN("Failed to open Lua watch directory: {}", g_state.watchDirs[i]);
+             continue;
+         }
+         if (!watches[i].IssueRead()) {
+@@ -136,7 +146,7 @@ void WatcherThread() {
+         }
+ 
+         watchPtrs[i] = &watches[i];
+-        LOG_PACKAGE_DEBUG("Watching Lua directory: {}", g_watchDirs[i]);
++        LOG_PACKAGE_DEBUG("Watching Lua directory: {}", g_state.watchDirs[i]);
+     }
+ 
+     bool allFailed = true;
+@@ -157,14 +167,14 @@ void WatcherThread() {
+         auto* watch = idx < watchPtrs.size() ? watchPtrs[idx] : nullptr;
+         if (!watch || !watch->IsOpen()) return;
+ 
+-        MergeChanges(accumulated, order, ToFileChanges(g_watchDirs[idx], watch->Drain()));
++        MergeChanges(accumulated, order, ToFileChanges(g_state.watchDirs[idx], watch->Drain()));
+         watch->IssueRead();
+     };
+ 
+-    while (g_running) {
++    while (g_state.running) {
+         auto waitResult = OSTPlatform::DirectoryWatch::WaitAny(watchPtrs, 1000);
+ 
+-        if (!g_running) break;
++        if (!g_state.running) break;
+         if (waitResult.status == OSTPlatform::DirectoryWatch::WaitStatus::Timeout) continue;
+         if (waitResult.status != OSTPlatform::DirectoryWatch::WaitStatus::Signaled ||
+             waitResult.index >= numDirs) {
+@@ -176,9 +186,9 @@ void WatcherThread() {
+ 
+         drainEvent(waitResult.index, accumulated, order);
+ 
+-        while (g_running) {
++        while (g_state.running) {
+             auto debounceResult = OSTPlatform::DirectoryWatch::WaitAny(watchPtrs, kDebounceMs);
+-            if (!g_running) break;
++            if (!g_state.running) break;
+             if (debounceResult.status == OSTPlatform::DirectoryWatch::WaitStatus::Timeout) break;
+             if (debounceResult.status != OSTPlatform::DirectoryWatch::WaitStatus::Signaled ||
+                 debounceResult.index >= numDirs) {
+@@ -201,20 +211,26 @@ void WatcherThread() {
+ } // namespace
+ 
+ void Start(const std::vector<std::string>& directories) {
+-    if (g_running.exchange(true)) {
++    std::lock_guard lock(g_state.lifecycle);
++    if (g_state.running.exchange(true)) {
+         LOG_PACKAGE_WARN("Lua watcher already running");
+         return;
+     }
+ 
+-    g_watchDirs = directories;
+-    g_watcherThread = std::thread(WatcherThread);
++    g_state.watchDirs = directories;
++    try {
++        g_state.thread = std::thread(WatcherThread);
++    } catch (...) {
++        g_state.running = false;
++        throw;
++    }
+ }
+ 
+ void Stop() {
+-    if (!g_running) return;
+-    g_running = false;
+-    if (g_watcherThread.joinable()) {
+-        g_watcherThread.join();
++    std::lock_guard lock(g_state.lifecycle);
++    g_state.running = false;
++    if (g_state.thread.joinable()) {
++        g_state.thread.join();
+     }
+ }
+ 

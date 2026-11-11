@@ -1,0 +1,408 @@
+diff --git a/src/common/rpc_handlers.cpp b/src/common/rpc_handlers.cpp
+index 4b50a7b..57c000b 100644
+--- a/src/common/rpc_handlers.cpp
++++ b/src/common/rpc_handlers.cpp
+@@ -134,23 +134,10 @@ static void SetRpcCrashContext(const char* phase, const char* method, uint32_t a
+ void ShutdownRpcHandlers() {
+ }
+ 
+-// Track (account, app) pairs that received a full manifest this session.
++// Track (account, app) pairs that received a full manifest in this process.
+ static std::unordered_set<uint64_t> g_fullManifestSentApps;
+ static std::mutex g_fullManifestSentMutex;
+ 
+-// Per-(account, app) cached CN and buildId for the fast repeat-call path.
+-static std::unordered_map<uint64_t, uint64_t> g_cachedCloudCN;
+-static std::unordered_map<uint64_t, uint64_t> g_cachedAppBuildIdHwm;
+-
+-static uint64_t GetCachedCloudCN(uint32_t accountId, uint32_t appId) {
+-    auto it = g_cachedCloudCN.find(MakeAppAccountKey(accountId, appId));
+-    return (it != g_cachedCloudCN.end()) ? it->second : 0;
+-}
+-static uint64_t GetCachedAppBuildIdHwm(uint32_t accountId, uint32_t appId) {
+-    auto it = g_cachedAppBuildIdHwm.find(MakeAppAccountKey(accountId, appId));
+-    return (it != g_cachedAppBuildIdHwm.end()) ? it->second : 0;
+-}
+-
+ // Per-app root tokens (e.g., "%GameInstall%") seen on uploads.
+ static std::unordered_map<uint64_t, std::unordered_set<std::string>> g_appRootTokens;
+ static std::mutex g_rootTokenMutex;
+@@ -289,15 +276,16 @@ static bool EnsureAppQuotaInjected(uint32_t accountId, uint32_t appId,
+ 
+ // Inject savefiles rules so AC exit-sync builds a valid file-root tree.
+ // Without this, namespace apps get all files deleted ("no longer matches patterns").
+-static std::unordered_set<uint32_t> g_saveFilesInjected;
++//
++// Not memoized: Steam can refresh an app's entry in its in-memory appinfo at any time
++// (the per-app KV is rebuilt from its cache or PICS) and that drops rules we injected,
++// or rules that were present when the session started. A one-shot "already done" flag
++// then leaves the exit sync with no rule and it deletes the app's cloud files. The
++// injector never overwrites a populated savefiles node, so repeating this is cheap and
++// idempotent; the mutex only keeps two RPC threads from editing the same KV together.
+ static std::mutex g_saveFilesInjectedMutex;
+ 
+ static void EnsureSaveFilesInjected(uint32_t appId) {
+-    {
+-        std::lock_guard<std::mutex> lock(g_saveFilesInjectedMutex);
+-        if (g_saveFilesInjected.count(appId)) return;
+-    }
+-
+     if (!SteamKvInjector::IsReady()) return;
+ 
+     std::string steamPath = CloudIntercept::GetSteamPath();
+@@ -318,10 +306,8 @@ static void EnsureSaveFilesInjected(uint32_t appId) {
+         kvRules.push_back(std::move(sr));
+     }
+ 
+-    if (SteamKvInjector::InjectSaveFiles(appId, kvRules)) {
+-        std::lock_guard<std::mutex> lock(g_saveFilesInjectedMutex);
+-        g_saveFilesInjected.insert(appId);
+-    }
++    std::lock_guard<std::mutex> lock(g_saveFilesInjectedMutex);
++    SteamKvInjector::InjectSaveFiles(appId, kvRules);
+ }
+ 
+ // g_lastVerifiedCN removed -- session lock in unified state file prevents concurrent writes.
+@@ -572,57 +558,6 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
+     if (CloudStorage::IsCloudActive())
+         CloudStorage::WaitForPendingPublish(accountId, appId);
+ 
+-    // Fast path: if full manifest already sent this session and cloud CN unchanged,
+-    // return empty delta. Serving 0 files is the only way to prevent per-file
+-    // reconciliation (IDA-verified: sub_138534B80 CN check is logging-only).
+-    {
+-        const uint64_t cacheKey = MakeAppAccountKey(accountId, appId);
+-        bool repeatCall = false;
+-        uint64_t cachedCN = 0;
+-        uint64_t cachedBuildId = 0;
+-        {
+-            std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
+-            if (g_fullManifestSentApps.count(cacheKey) > 0) {
+-                repeatCall = true;
+-                cachedCN = GetCachedCloudCN(accountId, appId);
+-                cachedBuildId = GetCachedAppBuildIdHwm(accountId, appId);
+-            }
+-        }
+-        if (repeatCall) {
+-            // CN probe; on change, invalidate cache and fall through to full fetch.
+-            bool probeNeeded = CloudStorage::IsCloudActive() && cachedCN > 0;
+-            uint64_t remoteCN = probeNeeded
+-                ? CloudStorage::FetchCloudCN(accountId, appId) : cachedCN;
+-            if (probeNeeded && remoteCN == 0) {
+-                // Probe failed; invalidate cache and fall through to full fetch.
+-                LOG("[NS-CL] GetAppFileChangelist app=%u: CN probe failed, invalidating cache",
+-                    appId);
+-                std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
+-                g_fullManifestSentApps.erase(cacheKey);
+-                g_cachedCloudCN.erase(cacheKey);
+-                g_cachedAppBuildIdHwm.erase(cacheKey);
+-                // Fall through to full fetch below
+-            } else if (remoteCN != cachedCN) {
+-                LOG("[NS-CL] GetAppFileChangelist app=%u: remote CN=%llu differs from cached CN=%llu, invalidating cache",
+-                    appId, remoteCN, cachedCN);
+-                std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
+-                g_fullManifestSentApps.erase(cacheKey);
+-                g_cachedCloudCN.erase(cacheKey);
+-                g_cachedAppBuildIdHwm.erase(cacheKey);
+-                // Fall through to full fetch below
+-            } else {
+-                LOG("[NS-CL] GetAppFileChangelist app=%u: repeat call, CN unchanged (%llu), returning cached empty delta",
+-                    appId, cachedCN);
+-                PB::Writer body;
+-                body.WriteVarint(1, cachedCN);
+-                body.WriteVarint(3, 1); // is_only_delta = 1
+-                body.WriteString(5, GetMachineName());
+-                body.WriteVarint(6, cachedBuildId);
+-                return body;
+-            }
+-        }
+-    }
+-
+     // Track whether we fetched fresh manifest from cloud this call
+     CloudStorage::Manifest cloudManifest;
+     std::unordered_map<std::string, CloudStorage::FileEntry> cloudFileEntries; // full per-file state from cloud
+@@ -778,8 +713,9 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
+                 appId, clientChangeNumber, cloudCN, files.size());
+         } else {
+             // No per-CN delta. clientCN > cloudCN (failed batch) → empty delta to
+-            // protect local saves. Already sent full → empty delta. Else first call →
+-            // full authoritative manifest.
++            // protect local saves. If this process already sent a full inventory,
++            // return the current authoritative inventory again. A later Steam sync
++            // can start moments after init/eval; a same-CN nonempty delta is invalid.
+             const uint64_t cacheKey = MakeAppAccountKey(accountId, appId);
+             bool alreadySentFull;
+             {
+@@ -798,10 +734,21 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
+                     "(failed batch), returning empty delta to protect local saves",
+                     appId, clientChangeNumber, cloudCN);
+             } else if (alreadySentFull) {
+-                // Subsequent call: empty delta (avoids stale SHA/timestamp conflicts).
+-                responseIsDelta = true;
+-                LOG("[NS-CL] GetAppFileChangelist app=%u: already sent full manifest this session, returning empty delta at CN=%llu",
+-                    appId, cloudCN);
++                // Repeat the same authoritative inventory. Since CN is unchanged,
++                // marking these entries as a delta makes Steam reject the file list.
++                responseIsDelta = false;
++                for (const auto& [filename, entry] : cloudManifest) {
++                    if (IsReservedBlobFilename(filename)) continue;
++                    LocalStorage::FileEntry fe;
++                    fe.filename = filename;
++                    fe.sha = entry.sha;
++                    fe.timestamp = entry.timestamp;
++                    fe.rawSize = entry.size;
++                    fe.deleted = false;
++                    files.push_back(std::move(fe));
++                }
++                LOG("[NS-CL] GetAppFileChangelist app=%u: repeat sync, returning full manifest (%zu files) at CN=%llu",
++                    appId, files.size(), cloudCN);
+             } else {
+                 // First call: full manifest. Use cloud timestamps so subsequent
+                 // compares see the same remotetime (avoids false conflicts).
+@@ -821,8 +768,6 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
+                 {
+                     std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
+                     g_fullManifestSentApps.insert(cacheKey);
+-                    g_cachedCloudCN[cacheKey] = cloudCN;
+-                    g_cachedAppBuildIdHwm[cacheKey] = appBuildIdHwm;
+                 }
+                 LOG("[NS-CL] GetAppFileChangelist app=%u: returning full manifest (%zu files) at CN=%llu (clientCN=%llu)",
+                     appId, files.size(), cloudCN, clientChangeNumber);
+@@ -853,8 +798,6 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
+         std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
+         if (g_fullManifestSentApps.count(cacheKey) == 0) {
+             g_fullManifestSentApps.insert(cacheKey);
+-            g_cachedCloudCN[cacheKey] = serverChangeNumber;
+-            g_cachedAppBuildIdHwm[cacheKey] = appBuildIdHwm;
+         }
+     }
+ 
+diff --git a/src/platform/win/cloud_intercept.cpp b/src/platform/win/cloud_intercept.cpp
+index 65bc5ca..fcf5327 100644
+--- a/src/platform/win/cloud_intercept.cpp
++++ b/src/platform/win/cloud_intercept.cpp
+@@ -1822,7 +1822,13 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
+ 
+     // Only intercept the RPCs known to use slot 4 directly (zero-alloc check via strcmp)
+     bool isSlot4Rpc = (strcmp(methodName, RPC_BEGIN_UPLOAD) == 0 || strcmp(methodName, RPC_COMMIT_UPLOAD) == 0 ||
+-                       strcmp(methodName, RPC_FILE_DOWNLOAD) == 0 || strcmp(methodName, RPC_DELETE_FILE) == 0);
++                       strcmp(methodName, RPC_FILE_DOWNLOAD) == 0 || strcmp(methodName, RPC_DELETE_FILE) == 0 ||
++                       // Newer Steam builds hand slot 5 an empty body (no appId) and only
++                       // populate it on the nested slot-4 call, so handle changelist here.
++                       strcmp(methodName, RPC_GET_CHANGELIST) == 0 ||
++                       strcmp(methodName, RPC_LAUNCH_INTENT) == 0 ||
++                       strcmp(methodName, RPC_BEGIN_BATCH) == 0 ||
++                       strcmp(methodName, RPC_COMPLETE_BATCH) == 0);
+     if (!isSlot4Rpc) {
+         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
+     }
+@@ -1872,6 +1878,9 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
+ 
+     // Capture SteamID from request header if not already cached.
+ 
++    // Mark CompleteBatch in flight so a nested slot-5 RPC during its slow promote/drain wait is detected.
++    CompleteBatchInFlightMark cbMark(strcmp(methodName, RPC_COMPLETE_BATCH) == 0);
++
+     // Call the appropriate handler to build a response body
+     auto dispatched = DispatchCloudRpc(methodName, realAppId, innerFields);
+     if (!dispatched.has_value()) {
+diff --git a/src/platform/win/sc_resolver.cpp b/src/platform/win/sc_resolver.cpp
+index ac9f1a0..633ae82 100644
+--- a/src/platform/win/sc_resolver.cpp
++++ b/src/platform/win/sc_resolver.cpp
+@@ -94,57 +94,122 @@ static uintptr_t ResolveServiceTransportVtable() {
+ }
+ 
+ // ── Global engine pointer ─────────────────────────────────────────────
+-// Approach: FlushAppMinutesPlayed at +0x09 loads g_pCSteamEngine via
+-// `mov rax, cs:[rip+disp]`. We can also scan for `lea rcx/rbx, [reg+0xE68]`
+-// (CAppInfoCache offset) and backwalk to the preceding mov from global.
+-// The CAppInfoCache approach is more generic and doesn't depend on any
+-// single function existing.
+-
+-static uintptr_t ResolveGlobalEngine(uintptr_t scBase) {
+-    // Strategy A: scan for `lea rcx, [reg+0xE68]` pattern (CAppInfoCache offset)
+-    // Pattern bytes: 48 8D 89 68 0E 00 00 (lea rcx,[rcx+0xE68])
+-    //           or:  48 8D 8B 68 0E 00 00 (lea rcx,[rbx+0xE68])
+-    // ModR/M byte 89=rcx+rcx, 8B=rcx+rbx, 8F=rcx+rdi, 8E=rcx+rsi
+-    // We use wildcard on the ModR/M to catch any source register:
+-    //   48 8D ?? 68 0E 00 00  where byte[2] & 0xC7 == 0x81 (disp32 + base reg)
+-    // Actually simpler: the 4-byte immediate 68 0E 00 00 (=0xE68) is distinctive.
+-
+-    // Scan for any `lea reg, [reg + 0x00000E68]` -- 7-byte form with disp32
+-    // The full pattern is: REX 8D ModRM disp32
+-    // REX = 48 or 4C; opcode = 8D; ModRM & 0xC0 == 0x80 (mod=10 = disp32)
+-    // and disp = 0x00000E68.
+-    const auto* text = reinterpret_cast<const uint8_t*>(SigScanner::GetTextBase());
+-    size_t textSize = SigScanner::GetTextSize();
++// The CAppInfoCache offset inside CSteamEngine moves between Steam builds
++// (0xE68 on 1788652215, 0x1208 on 1792618285), so it is not hardcoded.
++//   1. Every `call GetAppInfo` is preceded by `lea rcx, [reg+off]` (this =
++//      engine+off). The most common `off` among those call sites is the offset.
++//   2. Every `lea reg, [reg+off]` in .text is preceded by `mov reg, [rip+g]`
++//      loading g_pCSteamEngine. The most common `g` in .data is the global.
++// Both steps are majority votes with minimum thresholds; if either is
++// ambiguous the resolver reports failure rather than guessing.
++
++static uintptr_t ResolveGetAppInfo();
++
++static constexpr int kMinVotes = 3;
++
++// Fixed-size vote tally (no destructors, so it can live in __try functions).
++struct VoteTally {
++    static constexpr int kSlots = 16;
++    uintptr_t key[kSlots] = {};
++    int       count[kSlots] = {};
++    int       used = 0;
++    int       total = 0;
++
++    void Add(uintptr_t k) {
++        ++total;
++        for (int i = 0; i < used; ++i)
++            if (key[i] == k) { ++count[i]; return; }
++        if (used < kSlots) { key[used] = k; count[used++] = 1; }
++    }
++    int Best(uintptr_t& outKey) const {
++        int best = 0;
++        for (int i = 0; i < used; ++i)
++            if (count[i] > best) { best = count[i]; outKey = key[i]; }
++        return best;
++    }
++};
++
++static uintptr_t ResolveGlobalEngine(uintptr_t scBase, uintptr_t getAppInfoAddr,
++                                     uint32_t& outCacheOffset) {
++    outCacheOffset = 0;
++    if (!getAppInfoAddr) {
++        LOG("[Resolver] GlobalEngine: GetAppInfo unresolved, cannot derive CAppInfoCache offset");
++        return 0;
++    }
++
++    const uintptr_t textBase = SigScanner::GetTextBase();
++    const auto* text = reinterpret_cast<const uint8_t*>(textBase);
++    const size_t textSize = SigScanner::GetTextSize();
+ 
++    // Step 1: CAppInfoCache offset from `lea rcx,[reg+disp32]; call GetAppInfo`.
++    uint32_t offset = 0;
++    {
++        VoteTally votes;
++        int calls = 0;
++        __try {
++            for (size_t i = 7; i + 5 <= textSize; ++i) {
++                if (text[i] != 0xE8) continue;
++                int32_t rel = *reinterpret_cast<const int32_t*>(text + i + 1);
++                if (textBase + i + 5 + rel != getAppInfoAddr) continue;
++                ++calls;
++                const uint8_t* l = text + i - 7;
++                // REX.W (+B) 8D, ModRM mod=10 reg=rcx, disp32
++                if ((l[0] == 0x48 || l[0] == 0x49) && l[1] == 0x8D && (l[2] & 0xF8) == 0x88) {
++                    int32_t d = *reinterpret_cast<const int32_t*>(l + 3);
++                    if (d > 0) votes.Add((uintptr_t)d);
++                }
++            }
++        } __except (EXCEPTION_EXECUTE_HANDLER) {}
++
++        uintptr_t bestOff = 0;
++        int best = votes.Best(bestOff);
++        if (best < kMinVotes || best * 2 < votes.total) {
++            LOG("[Resolver] GlobalEngine: ambiguous CAppInfoCache offset "
++                "(calls=%d, lea votes=%d, best=%d)", calls, votes.total, best);
++            return 0;
++        }
++        offset = (uint32_t)bestOff;
++        LOG("[Resolver] CAppInfoCache offset 0x%X via GetAppInfo callers (%d/%d lea votes, %d calls)",
++            offset, best, votes.total, calls);
++    }
++
++    // Step 2: engine global from `mov reg,[rip+g]; ...; lea reg,[reg+offset]`.
++    VoteTally globals;
++    int sites = 0;
+     __try {
+         for (size_t i = 0; i + 7 <= textSize; ++i) {
+-            if ((text[i] == 0x48 || text[i] == 0x4C) && text[i+1] == 0x8D &&
+-                (text[i+2] & 0xC0) == 0x80) {
+-                // Check disp32 == 0xE68
+-                int32_t disp = *reinterpret_cast<const int32_t*>(text + i + 3);
+-                if (disp != 0xE68) continue;
+-
+-                uintptr_t leaAddr = SigScanner::GetTextBase() + i;
+-
+-                // Walk backward up to 40 bytes looking for `mov reg, [rip+disp]`
+-                for (int back = 7; back <= 40; ++back) {
+-                    uintptr_t candidate = leaAddr - back;
+-                    if (candidate < SigScanner::GetTextBase()) break;
+-                    uintptr_t global = SigScanner::DecodeRipRelMov(candidate);
+-                    if (global && global >= SigScanner::GetDataBase() &&
+-                        global < SigScanner::GetDataBase() + SigScanner::GetDataSize()) {
+-                        LOG("[Resolver] GlobalEngine @ %p (RVA 0x%llX) via lea+0xE68 backwalk",
+-                            (void*)global, (uint64_t)(global - scBase));
+-                        return global;
+-                    }
++            if ((text[i] != 0x48 && text[i] != 0x4C) || text[i+1] != 0x8D ||
++                (text[i+2] & 0xC0) != 0x80)
++                continue;
++            if (*reinterpret_cast<const int32_t*>(text + i + 3) != (int32_t)offset) continue;
++            ++sites;
++
++            uintptr_t leaAddr = textBase + i;
++            for (int back = 7; back <= 40; ++back) {
++                uintptr_t candidate = leaAddr - back;
++                if (candidate < textBase) break;
++                uintptr_t global = SigScanner::DecodeRipRelMov(candidate);
++                if (global && global >= SigScanner::GetDataBase() &&
++                    global < SigScanner::GetDataBase() + SigScanner::GetDataSize()) {
++                    globals.Add(global);
++                    break;
+                 }
+-                // Try next lea+0xE68 occurrence if backwalk failed
+             }
+         }
+     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+ 
+-    LOG("[Resolver] GlobalEngine: all strategies failed");
+-    return 0;
++    uintptr_t bestGlobal = 0;
++    int best = globals.Best(bestGlobal);
++    if (best < kMinVotes || best * 3 < globals.total * 2) {
++        LOG("[Resolver] GlobalEngine: ambiguous global for lea+0x%X "
++            "(sites=%d, resolved=%d, best=%d)", offset, sites, globals.total, best);
++        return 0;
++    }
++
++    outCacheOffset = offset;
++    LOG("[Resolver] GlobalEngine @ %p (RVA 0x%llX) via lea+0x%X backwalk (%d/%d sites)",
++        (void*)bestGlobal, (uint64_t)(bestGlobal - scBase), offset, best, sites);
++    return bestGlobal;
+ }
+ 
+ // ── Protobuf helpers ──────────────────────────────────────────────────
+@@ -605,8 +670,9 @@ ResolvedAddrs Resolve(uintptr_t steamClientBase) {
+     r.ccmInterfaceVtable = ResolveCCMInterfaceVtable();
+     r.serviceTransportVtable = ResolveServiceTransportVtable();
+ 
+-    // Phase 2: Global engine pointer
+-    r.globalEngine = ResolveGlobalEngine(steamClientBase);
++    // Phase 2: Global engine pointer (needs GetAppInfo to derive the CAppInfoCache offset)
++    r.getAppInfo   = ResolveGetAppInfo();
++    r.globalEngine = ResolveGlobalEngine(steamClientBase, r.getAppInfo, r.engineOffAppInfoCache);
+ 
+     // Phase 3: Protobuf helpers (signature-based)
+     r.serializeToArray = ResolveSerializeToArray();
+@@ -684,7 +750,7 @@ ResolvedAddrs Resolve(uintptr_t steamClientBase) {
+     r.kvSetString  = ResolveKvSetString();
+ 
+     // Phase 9: AppInfo functions (signature-based, ReadConfigU64 anchored to GetAppInfo)
+-    r.getAppInfo     = ResolveGetAppInfo();
++    // getAppInfo was resolved in phase 2 (global engine derivation depends on it).
+     r.getSection     = ResolveGetSection();
+     r.readConfigU64  = ResolveReadConfigU64(r.getAppInfo);
+ 
+@@ -1013,7 +1079,7 @@ ResolvedAddrs Resolve(uintptr_t steamClientBase) {
+     r.engineOffUserMap      = 0;
+     r.ccmOffConnContext     = 0;
+     r.userOffCcmInterface   = 0;
+-    r.engineOffAppInfoCache = 0xE68;
++    // engineOffAppInfoCache is derived in phase 2; 0 means unresolved (no hardcoded fallback).
+ 
+     LOG("[Resolver] === Auto-resolution complete ===");
+     return r;

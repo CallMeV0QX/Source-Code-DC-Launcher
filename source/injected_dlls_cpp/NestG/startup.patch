@@ -1,0 +1,1024 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index f3be0c7..dce4eab 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -220,8 +220,11 @@ endif()
+ # ---------------------------------------------------------------------------
+ # dwmapi.dll hijack — small loader DLL placed alongside Steam.
+ # ---------------------------------------------------------------------------
++enable_language(ASM_MASM)
+ add_library(dwmapi SHARED
+     dwmapi/dwmapi.cpp
++    dwmapi/dwmapi.def
++    dwmapi/thunks.asm
+ )
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/src/NestG/ProxyBootstrap.h b/src/NestG/ProxyBootstrap.h
+new file mode 100644
+index 0000000..224c116
+--- /dev/null
++++ b/src/NestG/ProxyBootstrap.h
+@@ -0,0 +1,46 @@
++#pragma once
++#include "StartupDiagnostics.h"
++
++namespace NestGProxy {
++inline bool IsSteamHost() noexcept {
++    wchar_t path[32768];
++    const DWORD length = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
++    if (!length || length >= ARRAYSIZE(path)) return false;
++    const wchar_t* name = wcsrchr(path, L'\\');
++    return name && _wcsicmp(name + 1, L"steam.exe") == 0;
++}
++
++inline DWORD WINAPI Initialize(void* module) noexcept {
++    NestGStartup::Write("proxy.worker");
++    wchar_t path[32768];
++    DWORD length = GetModuleFileNameW(static_cast<HMODULE>(module), path, ARRAYSIZE(path));
++    if (!length || length >= ARRAYSIZE(path) - 16) {
++        NestGStartup::Write("proxy.path.failed", GetLastError()); return 0;
++    }
++    wchar_t* slash = wcsrchr(path, L'\\');
++    if (!slash) { NestGStartup::Write("proxy.path.failed", ERROR_BAD_PATHNAME); return 0; }
++    wcscpy_s(slash + 1, ARRAYSIZE(path) - (slash + 1 - path), L"NestG.dll");
++    NestGStartup::Write("proxy.load.begin");
++    HMODULE runtime = LoadLibraryExW(path, nullptr,
++        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
++    if (!runtime) { NestGStartup::Write("proxy.load.failed", GetLastError()); return 0; }
++    auto initialize = reinterpret_cast<void(WINAPI*)()>(GetProcAddress(runtime, "NestGInitialize"));
++    if (!initialize) { NestGStartup::Write("proxy.export.failed", GetLastError()); return 0; }
++    NestGStartup::Write("proxy.load.complete");
++    initialize(); // The runtime serializes initialization across both proxies.
++    return 0;
++}
++
++inline void Attach(HMODULE module) noexcept {
++    if (!IsSteamHost()) return;
++    // No LoadLibrary or waiting under the loader lock. Pin before scheduling so
++    // a host FreeLibrary cannot unmap the worker's instructions before it runs.
++    HMODULE pinned = nullptr;
++    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
++            reinterpret_cast<LPCWSTR>(module), &pinned)) return;
++    HANDLE thread = CreateThread(nullptr, 0, Initialize, module, 0, nullptr);
++    if (thread) CloseHandle(thread);
++    else NestGStartup::Write("proxy.worker.failed", GetLastError());
++    // The optional runtime failing never makes the OS proxy's DllMain fail.
++}
++}
+diff --git a/src/NestG/StartupDiagnostics.h b/src/NestG/StartupDiagnostics.h
+new file mode 100644
+index 0000000..48b2d73
+--- /dev/null
++++ b/src/NestG/StartupDiagnostics.h
+@@ -0,0 +1,53 @@
++#pragma once
++#include <windows.h>
++#include <cstdio>
++#include <cwchar>
++
++// Release diagnostics use fixed stage labels and numeric OS errors only.
++// Never enable upstream verbose logging of Lua, tickets or provider settings.
++namespace NestGStartup {
++inline void Write(const char* stage, DWORD error = ERROR_SUCCESS) noexcept {
++    const DWORD savedError = GetLastError();
++    HMODULE self = nullptr;
++    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
++            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++            reinterpret_cast<LPCWSTR>(&Write), &self)) {
++        wchar_t path[32768];
++        DWORD length = GetModuleFileNameW(self, path, ARRAYSIZE(path));
++        if (length && length < ARRAYSIZE(path) - 64) {
++            wchar_t* slash = wcsrchr(path, L'\\');
++            if (slash) {
++                wcscpy_s(slash + 1, ARRAYSIZE(path) - (slash + 1 - path), L"opensteamtool");
++                CreateDirectoryW(path, nullptr);
++                wcscat_s(path, L"\\nestg_startup.log");
++                HANDLE file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
++                    OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
++                if (file != INVALID_HANDLE_VALUE) {
++                    BY_HANDLE_FILE_INFORMATION info{};
++                    LARGE_INTEGER size{}, zero{};
++                    if (GetFileInformationByHandle(file, &info) &&
++                        !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
++                        GetFileSizeEx(file, &size)) {
++                        if (size.QuadPart > 512 * 1024) {
++                            SetFilePointerEx(file, zero, nullptr, FILE_BEGIN);
++                            SetEndOfFile(file);
++                        }
++                        SetFilePointerEx(file, zero, nullptr, FILE_END);
++                        SYSTEMTIME time; GetSystemTime(&time);
++                        char line[256];
++                        int count = sprintf_s(line,
++                            "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ PID=%lu TID=%lu Stage=%s Error=%lu\r\n",
++                            time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
++                            time.wSecond, time.wMilliseconds, GetCurrentProcessId(),
++                            GetCurrentThreadId(), stage, error);
++                        DWORD written;
++                        if (count > 0) WriteFile(file, line, count, &written, nullptr);
++                    }
++                    CloseHandle(file);
++                }
++            }
++        }
++    }
++    SetLastError(savedError);
++}
++}
+diff --git a/src/Utils/CloudRedirect/CloudRedirectHost.cpp b/src/Utils/CloudRedirect/CloudRedirectHost.cpp
+index ee12043..1a67fd3 100644
+--- a/src/Utils/CloudRedirect/CloudRedirectHost.cpp
++++ b/src/Utils/CloudRedirect/CloudRedirectHost.cpp
+@@ -1,4 +1,5 @@
+ #include "CloudRedirectHost.h"
++#include "NestG/StartupDiagnostics.h"
+ 
+ #include "OSTPlatform/include/DynamicLibrary.h"
+ #include "Utils/Config/Config.h"
+@@ -88,6 +89,7 @@ namespace {
+ void Initialize(const char* steamInstallPath) {
+     const Config::CloudSettings cloud = Config::GetCloudSettings();
+     if (!cloud.enabled) {
++        NestGStartup::Write("cloud.disabled");
+         LOG_INFO("CloudRedirect: [cloud].enabled is false, cloud save redirection disabled");
+         return;
+     }
+@@ -101,12 +103,15 @@ void Initialize(const char* steamInstallPath) {
+ 
+     const std::filesystem::path libPath = ResolveLibraryPath(steamInstallPath, cloud.library);
+     if (!std::filesystem::exists(libPath)) {
++        NestGStartup::Write("cloud.file.missing", ERROR_MOD_NOT_FOUND);
+         LOG_WARN("CloudRedirect: cloud_redirect.dll not found at {}", libPath.string());
+         return;
+     }
+ 
++    NestGStartup::Write("cloud.load.begin");
+     g_module = OSTPlatform::DynamicLibrary::Load(libPath);
+     if (!g_module) {
++        NestGStartup::Write("cloud.load.failed", GetLastError());
+         LOG_WARN("CloudRedirect: failed to load {} (err={})",
+                  libPath.string(), OSTPlatform::DynamicLibrary::GetLastErrorCode());
+         return;
+@@ -119,6 +124,7 @@ void Initialize(const char* steamInstallPath) {
+     ok &= ResolveSymbol(g_module, "CR_IsApp",          g_isApp);
+     ok &= ResolveSymbol(g_module, "CR_Shutdown",       g_shutdownFn);
+     if (!ok) {
++        NestGStartup::Write("cloud.exports.failed", ERROR_PROC_NOT_FOUND);
+         LOG_WARN("CloudRedirect: cloud_redirect.dll is missing required exports, disabling");
+         g_module = nullptr;
+         return;
+@@ -132,12 +138,15 @@ void Initialize(const char* steamInstallPath) {
+     ResolveSymbol(g_module, "CR_GetAchievements",    g_getAchievements);
+     ResolveSymbol(g_module, "CR_InstallVtableHooks", g_installVtableHooks);
+ 
++    NestGStartup::Write("cloud.init.begin");
+     if (!g_initCloudSave(steamInstallPath, &CloudNotify)) {
++        NestGStartup::Write("cloud.init.failed");
+         LOG_WARN("CloudRedirect: CR_InitCloudSave failed, disabling cloud save redirection");
+         g_module = nullptr;
+         return;
+     }
+ 
++    NestGStartup::Write("cloud.init.complete");
+     g_active.store(true, std::memory_order_release);
+     LOG_INFO("CloudRedirect: loaded {} and initialised cloud save redirection",
+              libPath.string());
+diff --git a/src/dllmain.cpp b/src/dllmain.cpp
+index 4a82fc6..d159332 100644
+--- a/src/dllmain.cpp
++++ b/src/dllmain.cpp
+@@ -1,4 +1,6 @@
+ #include "dllmain.h"
++#include "NestG/StartupDiagnostics.h"
++#include "OSTPlatform/include/Encoding.h"
+ #include "Hook/HookManager.h"
+ #include "Utils/Config/Config.h"
+ #include "Utils/Config/ConfigFileWatcher.h"
+@@ -19,9 +21,9 @@
+ #include <windows.h>
+ 
+ // prepare key runtime paths.
+-bool InitializeSteamComponents()
++bool InitializeSteamComponents(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
+ {
+-    const std::string steamInstallPath = OSTPlatform::DynamicLibrary::GetCurrentDirectoryPath();
++    const std::string steamInstallPath = OSTPlatform::Encoding::WideToUtf8(OSTPlatform::DynamicLibrary::GetModuleDirectory(selfModule).wstring());
+     if (steamInstallPath.empty()) {
+         return false;
+     }
+@@ -52,14 +54,17 @@ bool InitializeSteamComponents()
+ // memory, or installs detours runs here on a worker thread — we MUST NOT do
+ // any of that from inside DllMain (loader lock).
+ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule) {
++    NestGStartup::Write("runtime.init.begin");
+     Log::Init(selfModule);
+     LOG_INFO("OpenSteamTool init thread started");
+ 
+-    if (!InitializeSteamComponents()) {
++    if (!InitializeSteamComponents(selfModule)) {
++        NestGStartup::Write("runtime.modules.failed", GetLastError());
+         LOG_ERROR("InitializeSteamComponents failed");
+         return 1;
+     }
+ 
++    NestGStartup::Write("runtime.config.begin");
+     Config::Load(ConfigPath);
+     Log::InitModules();
+     Log::InstallPlatformLogSink();
+@@ -69,12 +74,15 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
+     // Each call computes the SHA-256 of the DLL on disk, checks the local
+     // cache, and downloads from GitHub if needed.  Both calls are synchronous
+     // but run on this worker thread, never under the loader lock.
++    NestGStartup::Write("runtime.patterns.begin");
+     PatternLoader::Load(ui_hModule, SteamUIPath, "steamui");
+     PatternLoader::Load(client_hModule, SteamclientPath, "steamclient");
+ 
+     // IPC method metadata (funcHash, fencepost, argc, ...)
++    NestGStartup::Write("runtime.ipc.begin");
+     IPCLoader::Load(SteamclientPath);
+ 
++    NestGStartup::Write("runtime.lua.begin");
+     std::vector<std::string> watchDirs =
+         LuaConfig::MergeWatchDirs(Config::GetLuaPaths(), std::string(LuaDir));
+     for (const auto& dir : watchDirs)
+@@ -83,7 +91,9 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
+     LuaFileWatcher::Start(watchDirs);
+     ConfigFileWatcher::Start(ConfigPath, LuaDir);
+ 
++    NestGStartup::Write("runtime.hooks.ui.begin");
+     SteamUI::CoreHook();
++    NestGStartup::Write("runtime.hooks.client.begin");
+     SteamClient::CoreHook();
+ 
+     // Surface any functions that FindPattern() could not locate.
+@@ -91,6 +101,7 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
+ 
+     // Optional Steam Cloud save redirection (CloudRedirect). No-op unless
+     // [cloud].enabled is set and cloud_redirect.dll is present.
++    NestGStartup::Write("runtime.cloud.begin");
+     CloudRedirectHost::Initialize(SteamInstallPath);
+ 
+     // Contributes manifest request codes for depots this account owns, on
+@@ -131,44 +142,41 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
+     LOG_INFO("Self-updater not compiled in (OST_ENABLE_UPDATER=OFF)");
+ #endif
+ 
++    NestGStartup::Write("runtime.init.complete");
+     LOG_INFO("OpenSteamTool init complete");
+     return 0;
+ }
+ 
+-// True only when the host process is steam.exe. The proxy DLLs already gate injection to
+-// Steam, but rundll32 loads this DLL directly to service a bst:// link — there we must NOT
+-// run the Steam-injection machinery (steamclient load, hooks, watchers); the TokeerUri
+-// export does its work standalone.
+-static bool IsSteamHost()
+-{
+-    char exePath[MAX_PATH];
+-    if (!GetModuleFileNameA(nullptr, exePath, MAX_PATH)) return false;
+-    const char* name = strrchr(exePath, '\\');
+-    name = name ? name + 1 : exePath;
+-    return _stricmp(name, "steam.exe") == 0;
++static HMODULE g_self = nullptr;
++static INIT_ONCE g_initialize = INIT_ONCE_STATIC_INIT;
++static BOOL CALLBACK InitializeOnce(PINIT_ONCE, PVOID, PVOID*) {
++    try {
++        InitThread(reinterpret_cast<OSTPlatform::DynamicLibrary::ModuleHandle>(g_self));
++    } catch (const std::exception&) {
++        // Do not log exception text, which can contain paths or configuration.
++        NestGStartup::Write("runtime.exception", ERROR_UNHANDLED_EXCEPTION);
++    } catch (...) {
++        NestGStartup::Write("runtime.exception.unknown", ERROR_UNHANDLED_EXCEPTION);
++    }
++    return TRUE; // A failed/partial initialization must never be repeated in-process.
+ }
+ 
+-BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
+-{
+-    if (dwReason == DLL_PROCESS_ATTACH)
+-    {
+-        DisableThreadLibraryCalls(hModule);
+-        if (!IsSteamHost())
+-            return TRUE;   // e.g. rundll32 bst:// handler — no injection here
+-        // Hand off all real work to a worker thread to avoid running file I/O,
+-        // module loading and detour transactions under the loader lock.
+-        OSTPlatform::Thread::StartDetached([module = reinterpret_cast<OSTPlatform::DynamicLibrary::ModuleHandle>(hModule)] {
+-            return InitThread(module);
+-        });
+-    }
+-    else if (dwReason == DLL_PROCESS_DETACH && IsSteamHost())
+-    {
+-        ConfigFileWatcher::Stop();
+-        LuaFileWatcher::Stop();
+-        SteamUI::CoreUnhook();
+-        SteamClient::CoreUnhook();
+-        CloudRedirectHost::Shutdown();
+-    }
++extern "C" __declspec(dllexport) void WINAPI NestGInitialize() {
++    // Called on a proxy worker after the OS loader lock has been released.
++    wchar_t executable[32768];
++    DWORD length = GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable));
++    if (!length || length >= ARRAYSIZE(executable)) return;
++    const wchar_t* name = wcsrchr(executable, L'\\');
++    if (!name || _wcsicmp(name + 1, L"steam.exe") != 0) return;
++    HMODULE pinned;
++    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
++            reinterpret_cast<LPCWSTR>(g_self), &pinned)) return;
++    InitOnceExecuteOnce(&g_initialize, InitializeOnce, nullptr, nullptr);
++}
+ 
++BOOL APIENTRY DllMain(HMODULE module, DWORD reason, PVOID) {
++    if (reason == DLL_PROCESS_ATTACH) g_self = module;
++    // Process-lifetime runtime: never join watchers or call cloud shutdown while
++    // Windows holds the loader lock and has already terminated other threads.
+     return TRUE;
+-}
++}
+\ No newline at end of file
+diff --git a/src/dwmapi/dwmapi.cpp b/src/dwmapi/dwmapi.cpp
+index 8be60a2..34be2d4 100644
+--- a/src/dwmapi/dwmapi.cpp
++++ b/src/dwmapi/dwmapi.cpp
+@@ -1,147 +1,36 @@
+-// dwmapi.dll HiJack Project
++#include "../NestG/ProxyBootstrap.h"
+ 
+-#include <windows.h>
+-#include <cstring>
+-
+-
+-#pragma comment(linker, "/EXPORT:DllCanUnloadNow=DWMAPI.DllCanUnloadNow,@111")
+-#pragma comment(linker, "/EXPORT:DllGetClassObject=DWMAPI.DllGetClassObject,@115")
+-#pragma comment(linker, "/EXPORT:DwmAttachMilContent=DWMAPI.DwmAttachMilContent,@116")
+-#pragma comment(linker, "/EXPORT:DwmDefWindowProc=DWMAPI.DwmDefWindowProc,@117")
+-#pragma comment(linker, "/EXPORT:DwmDetachMilContent=DWMAPI.DwmDetachMilContent,@118")
+-#pragma comment(linker, "/EXPORT:DwmEnableBlurBehindWindow=DWMAPI.DwmEnableBlurBehindWindow,@119")
+-#pragma comment(linker, "/EXPORT:DwmEnableComposition=DWMAPI.DwmEnableComposition,@102")
+-#pragma comment(linker, "/EXPORT:DwmEnableMMCSS=DWMAPI.DwmEnableMMCSS,@120")
+-#pragma comment(linker, "/EXPORT:DwmExtendFrameIntoClientArea=DWMAPI.DwmExtendFrameIntoClientArea,@121")
+-#pragma comment(linker, "/EXPORT:DwmFlush=DWMAPI.DwmFlush,@122")
+-#pragma comment(linker, "/EXPORT:DwmGetColorizationColor=DWMAPI.DwmGetColorizationColor,@123")
+-#pragma comment(linker, "/EXPORT:DwmGetCompositionTimingInfo=DWMAPI.DwmGetCompositionTimingInfo,@125")
+-#pragma comment(linker, "/EXPORT:DwmGetGraphicsStreamClient=DWMAPI.DwmGetGraphicsStreamClient,@126")
+-#pragma comment(linker, "/EXPORT:DwmGetGraphicsStreamTransformHint=DWMAPI.DwmGetGraphicsStreamTransformHint,@129")
+-#pragma comment(linker, "/EXPORT:DwmGetTransportAttributes=DWMAPI.DwmGetTransportAttributes,@130")
+-#pragma comment(linker, "/EXPORT:DwmGetUnmetTabRequirements=DWMAPI.DwmGetUnmetTabRequirements,@133")
+-#pragma comment(linker, "/EXPORT:DwmGetWindowAttribute=DWMAPI.DwmGetWindowAttribute,@134")
+-#pragma comment(linker, "/EXPORT:DwmInvalidateIconicBitmaps=DWMAPI.DwmInvalidateIconicBitmaps,@149")
+-#pragma comment(linker, "/EXPORT:DwmIsCompositionEnabled=DWMAPI.DwmIsCompositionEnabled,@188")
+-#pragma comment(linker, "/EXPORT:DwmModifyPreviousDxFrameDuration=DWMAPI.DwmModifyPreviousDxFrameDuration,@189")
+-#pragma comment(linker, "/EXPORT:DwmQueryThumbnailSourceSize=DWMAPI.DwmQueryThumbnailSourceSize,@190")
+-#pragma comment(linker, "/EXPORT:DwmRegisterThumbnail=DWMAPI.DwmRegisterThumbnail,@191")
+-#pragma comment(linker, "/EXPORT:DwmRenderGesture=DWMAPI.DwmRenderGesture,@192")
+-#pragma comment(linker, "/EXPORT:DwmSetDxFrameDuration=DWMAPI.DwmSetDxFrameDuration,@193")
+-#pragma comment(linker, "/EXPORT:DwmSetIconicLivePreviewBitmap=DWMAPI.DwmSetIconicLivePreviewBitmap,@194")
+-#pragma comment(linker, "/EXPORT:DwmSetIconicThumbnail=DWMAPI.DwmSetIconicThumbnail,@195")
+-#pragma comment(linker, "/EXPORT:DwmSetPresentParameters=DWMAPI.DwmSetPresentParameters,@196")
+-#pragma comment(linker, "/EXPORT:DwmSetWindowAttribute=DWMAPI.DwmSetWindowAttribute,@197")
+-#pragma comment(linker, "/EXPORT:DwmShowContact=DWMAPI.DwmShowContact,@198")
+-#pragma comment(linker, "/EXPORT:DwmTetherContact=DWMAPI.DwmTetherContact,@199")
+-#pragma comment(linker, "/EXPORT:DwmTetherTextContact=DWMAPI.DwmTetherTextContact,@156")
+-#pragma comment(linker, "/EXPORT:DwmTransitionOwnedWindow=DWMAPI.DwmTransitionOwnedWindow,@200")
+-#pragma comment(linker, "/EXPORT:DwmUnregisterThumbnail=DWMAPI.DwmUnregisterThumbnail,@201")
+-#pragma comment(linker, "/EXPORT:DwmUpdateThumbnailProperties=DWMAPI.DwmUpdateThumbnailProperties,@202")
+-#pragma comment(linker, "/EXPORT:DwmpAllocateSecurityDescriptor=DWMAPI.DwmpAllocateSecurityDescriptor,@136")
+-#pragma comment(linker, "/EXPORT:DwmpDxGetWindowSharedSurface=DWMAPI.DwmpDxGetWindowSharedSurface,@100")
+-#pragma comment(linker, "/EXPORT:DwmpDxUpdateWindowSharedSurface=DWMAPI.DwmpDxUpdateWindowSharedSurface,@101")
+-#pragma comment(linker, "/EXPORT:DwmpDxgiIsThreadDesktopComposited=DWMAPI.DwmpDxgiIsThreadDesktopComposited,@128")
+-#pragma comment(linker, "/EXPORT:DwmpEnableDDASupport=DWMAPI.DwmpEnableDDASupport,@143")
+-#pragma comment(linker, "/EXPORT:DwmpFreeSecurityDescriptor=DWMAPI.DwmpFreeSecurityDescriptor,@137")
+-#pragma comment(linker, "/EXPORT:DwmpGetColorizationParameters=DWMAPI.DwmpGetColorizationParameters,@127")
+-#pragma comment(linker, "/EXPORT:DwmpRenderFlick=DWMAPI.DwmpRenderFlick,@135")
+-#pragma comment(linker, "/EXPORT:DwmpSetColorizationParameters=DWMAPI.DwmpSetColorizationParameters,@131")
+-#pragma comment(linker, "/EXPORT:DwmpUpdateProxyWindowForCapture=DWMAPI.DwmpUpdateProxyWindowForCapture,@183")
+-#pragma comment(linker, "/EXPORT:#103=DWMAPI.#103,@103,NONAME")
+-#pragma comment(linker, "/EXPORT:#104=DWMAPI.#104,@104,NONAME")
+-#pragma comment(linker, "/EXPORT:#105=DWMAPI.#105,@105,NONAME")
+-#pragma comment(linker, "/EXPORT:#106=DWMAPI.#106,@106,NONAME")
+-#pragma comment(linker, "/EXPORT:#107=DWMAPI.#107,@107,NONAME")
+-#pragma comment(linker, "/EXPORT:#108=DWMAPI.#108,@108,NONAME")
+-#pragma comment(linker, "/EXPORT:#109=DWMAPI.#109,@109,NONAME")
+-#pragma comment(linker, "/EXPORT:#110=DWMAPI.#110,@110,NONAME")
+-#pragma comment(linker, "/EXPORT:#112=DWMAPI.#112,@112,NONAME")
+-#pragma comment(linker, "/EXPORT:#113=DWMAPI.#113,@113,NONAME")
+-#pragma comment(linker, "/EXPORT:#114=DWMAPI.#114,@114,NONAME")
+-#pragma comment(linker, "/EXPORT:#124=DWMAPI.#124,@124,NONAME")
+-#pragma comment(linker, "/EXPORT:#132=DWMAPI.#132,@132,NONAME")
+-#pragma comment(linker, "/EXPORT:#138=DWMAPI.#138,@138,NONAME")
+-#pragma comment(linker, "/EXPORT:#139=DWMAPI.#139,@139,NONAME")
+-#pragma comment(linker, "/EXPORT:#140=DWMAPI.#140,@140,NONAME")
+-#pragma comment(linker, "/EXPORT:#141=DWMAPI.#141,@141,NONAME")
+-#pragma comment(linker, "/EXPORT:#142=DWMAPI.#142,@142,NONAME")
+-#pragma comment(linker, "/EXPORT:#144=DWMAPI.#144,@144,NONAME")
+-#pragma comment(linker, "/EXPORT:#145=DWMAPI.#145,@145,NONAME")
+-#pragma comment(linker, "/EXPORT:#146=DWMAPI.#146,@146,NONAME")
+-#pragma comment(linker, "/EXPORT:#147=DWMAPI.#147,@147,NONAME")
+-#pragma comment(linker, "/EXPORT:#148=DWMAPI.#148,@148,NONAME")
+-#pragma comment(linker, "/EXPORT:#150=DWMAPI.#150,@150,NONAME")
+-#pragma comment(linker, "/EXPORT:#151=DWMAPI.#151,@151,NONAME")
+-#pragma comment(linker, "/EXPORT:#152=DWMAPI.#152,@152,NONAME")
+-#pragma comment(linker, "/EXPORT:#153=DWMAPI.#153,@153,NONAME")
+-#pragma comment(linker, "/EXPORT:#154=DWMAPI.#154,@154,NONAME")
+-#pragma comment(linker, "/EXPORT:#155=DWMAPI.#155,@155,NONAME")
+-#pragma comment(linker, "/EXPORT:#157=DWMAPI.#157,@157,NONAME")
+-#pragma comment(linker, "/EXPORT:#158=DWMAPI.#158,@158,NONAME")
+-#pragma comment(linker, "/EXPORT:#159=DWMAPI.#159,@159,NONAME")
+-#pragma comment(linker, "/EXPORT:#160=DWMAPI.#160,@160,NONAME")
+-#pragma comment(linker, "/EXPORT:#161=DWMAPI.#161,@161,NONAME")
+-#pragma comment(linker, "/EXPORT:#162=DWMAPI.#162,@162,NONAME")
+-#pragma comment(linker, "/EXPORT:#163=DWMAPI.#163,@163,NONAME")
+-#pragma comment(linker, "/EXPORT:#164=DWMAPI.#164,@164,NONAME")
+-#pragma comment(linker, "/EXPORT:#165=DWMAPI.#165,@165,NONAME")
+-#pragma comment(linker, "/EXPORT:#166=DWMAPI.#166,@166,NONAME")
+-#pragma comment(linker, "/EXPORT:#167=DWMAPI.#167,@167,NONAME")
+-#pragma comment(linker, "/EXPORT:#168=DWMAPI.#168,@168,NONAME")
+-#pragma comment(linker, "/EXPORT:#169=DWMAPI.#169,@169,NONAME")
+-#pragma comment(linker, "/EXPORT:#170=DWMAPI.#170,@170,NONAME")
+-#pragma comment(linker, "/EXPORT:#171=DWMAPI.#171,@171,NONAME")
+-#pragma comment(linker, "/EXPORT:#172=DWMAPI.#172,@172,NONAME")
+-#pragma comment(linker, "/EXPORT:#173=DWMAPI.#173,@173,NONAME")
+-#pragma comment(linker, "/EXPORT:#174=DWMAPI.#174,@174,NONAME")
+-#pragma comment(linker, "/EXPORT:#175=DWMAPI.#175,@175,NONAME")
+-#pragma comment(linker, "/EXPORT:#176=DWMAPI.#176,@176,NONAME")
+-#pragma comment(linker, "/EXPORT:#177=DWMAPI.#177,@177,NONAME")
+-#pragma comment(linker, "/EXPORT:#178=DWMAPI.#178,@178,NONAME")
+-#pragma comment(linker, "/EXPORT:#179=DWMAPI.#179,@179,NONAME")
+-#pragma comment(linker, "/EXPORT:#180=DWMAPI.#180,@180,NONAME")
+-#pragma comment(linker, "/EXPORT:#181=DWMAPI.#181,@181,NONAME")
+-#pragma comment(linker, "/EXPORT:#182=DWMAPI.#182,@182,NONAME")
+-#pragma comment(linker, "/EXPORT:#184=DWMAPI.#184,@184,NONAME")
+-#pragma comment(linker, "/EXPORT:#185=DWMAPI.#185,@185,NONAME")
+-#pragma comment(linker, "/EXPORT:#186=DWMAPI.#186,@186,NONAME")
+-#pragma comment(linker, "/EXPORT:#187=DWMAPI.#187,@187,NONAME")
+-
+-// Only inject when the host process is steam.exe (case-insensitive).
+-// LoadLibraryA itself guarantees that NestG.dll's DllMain
+-// runs at most once per process, so multiple hijack DLLs can safely
+-// call this without additional synchronisation.
+-BOOL OpenSteamToolLoad()
+-{
+-    char exePath[MAX_PATH];
+-    if (GetModuleFileNameA(NULL, exePath, MAX_PATH))
+-    {
+-        const char* exeName = strrchr(exePath, '\\');
+-        exeName = exeName ? exeName + 1 : exePath;
+-        if (_stricmp(exeName, "steam.exe") != 0)
+-            return TRUE;   // not Steam — let the proxy load, but don't inject
++namespace {
++INIT_ONCE once = INIT_ONCE_STATIC_INIT;
++FARPROC functions[103]{};
++const char* const exports[] = {
++#include "exports.inc"
++};
++static_assert(ARRAYSIZE(exports) == ARRAYSIZE(functions));
++HRESULT WINAPI MissingExport() { SetLastError(ERROR_PROC_NOT_FOUND); return E_NOTIMPL; }
++BOOL CALLBACK LoadSystemDwm(PINIT_ONCE, PVOID, PVOID*) {
++    wchar_t path[MAX_PATH];
++    HMODULE real = nullptr;
++    const UINT length = GetSystemDirectoryW(path, ARRAYSIZE(path));
++    if (length && length < ARRAYSIZE(path) - 12) {
++        wcscat_s(path, L"\\dwmapi.dll");
++        real = LoadLibraryExW(path, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+     }
+-    return LoadLibraryA("NestG.dll") != NULL;
+-}
+-
+-
+-BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
+-{
+-    switch (dwReason)
+-    {
+-    case DLL_PROCESS_ATTACH:
+-        {
+-            DisableThreadLibraryCalls(hModule);
+-            if ( !OpenSteamToolLoad() )
+-                return FALSE;
+-            break;
+-        }
+-    case DLL_THREAD_ATTACH:
+-    case DLL_THREAD_DETACH:
+-    case DLL_PROCESS_DETACH:
+-        break;
++    if (!real) NestGStartup::Write("dwm.system.failed", GetLastError());
++    for (size_t i = 0; i < ARRAYSIZE(functions); ++i) {
++        auto function = real ? GetProcAddress(real, exports[i]) : nullptr;
++        functions[i] = function ? function : reinterpret_cast<FARPROC>(&MissingExport);
+     }
+     return TRUE;
+ }
+-
++}
++extern "C" FARPROC NestGResolveDwm(unsigned index) {
++    const DWORD error = GetLastError();
++    InitOnceExecuteOnce(&once, LoadSystemDwm, nullptr, nullptr);
++    SetLastError(error);
++    return functions[index];
++}
++BOOL WINAPI DllMain(HMODULE module, DWORD reason, void*) {
++    if (reason == DLL_PROCESS_ATTACH) NestGProxy::Attach(module);
++    return TRUE;
++}
+\ No newline at end of file
+diff --git a/src/dwmapi/dwmapi.def b/src/dwmapi/dwmapi.def
+new file mode 100644
+index 0000000..d1cbd53
+--- /dev/null
++++ b/src/dwmapi/dwmapi.def
+@@ -0,0 +1,105 @@
++LIBRARY dwmapi
++EXPORTS
++    DllCanUnloadNow=NestGDwm0 @111
++    DllGetClassObject=NestGDwm1 @115
++    DwmAttachMilContent=NestGDwm2 @116
++    DwmDefWindowProc=NestGDwm3 @117
++    DwmDetachMilContent=NestGDwm4 @118
++    DwmEnableBlurBehindWindow=NestGDwm5 @119
++    DwmEnableComposition=NestGDwm6 @102
++    DwmEnableMMCSS=NestGDwm7 @120
++    DwmExtendFrameIntoClientArea=NestGDwm8 @121
++    DwmFlush=NestGDwm9 @122
++    DwmGetColorizationColor=NestGDwm10 @123
++    DwmGetCompositionTimingInfo=NestGDwm11 @125
++    DwmGetGraphicsStreamClient=NestGDwm12 @126
++    DwmGetGraphicsStreamTransformHint=NestGDwm13 @129
++    DwmGetTransportAttributes=NestGDwm14 @130
++    DwmGetUnmetTabRequirements=NestGDwm15 @133
++    DwmGetWindowAttribute=NestGDwm16 @134
++    DwmInvalidateIconicBitmaps=NestGDwm17 @149
++    DwmIsCompositionEnabled=NestGDwm18 @188
++    DwmModifyPreviousDxFrameDuration=NestGDwm19 @189
++    DwmQueryThumbnailSourceSize=NestGDwm20 @190
++    DwmRegisterThumbnail=NestGDwm21 @191
++    DwmRenderGesture=NestGDwm22 @192
++    DwmSetDxFrameDuration=NestGDwm23 @193
++    DwmSetIconicLivePreviewBitmap=NestGDwm24 @194
++    DwmSetIconicThumbnail=NestGDwm25 @195
++    DwmSetPresentParameters=NestGDwm26 @196
++    DwmSetWindowAttribute=NestGDwm27 @197
++    DwmShowContact=NestGDwm28 @198
++    DwmTetherContact=NestGDwm29 @199
++    DwmTetherTextContact=NestGDwm30 @156
++    DwmTransitionOwnedWindow=NestGDwm31 @200
++    DwmUnregisterThumbnail=NestGDwm32 @201
++    DwmUpdateThumbnailProperties=NestGDwm33 @202
++    DwmpAllocateSecurityDescriptor=NestGDwm34 @136
++    DwmpDxGetWindowSharedSurface=NestGDwm35 @100
++    DwmpDxUpdateWindowSharedSurface=NestGDwm36 @101
++    DwmpDxgiIsThreadDesktopComposited=NestGDwm37 @128
++    DwmpEnableDDASupport=NestGDwm38 @143
++    DwmpFreeSecurityDescriptor=NestGDwm39 @137
++    DwmpGetColorizationParameters=NestGDwm40 @127
++    DwmpRenderFlick=NestGDwm41 @135
++    DwmpSetColorizationParameters=NestGDwm42 @131
++    DwmpUpdateProxyWindowForCapture=NestGDwm43 @183
++    NestGDwm44 @103 NONAME
++    NestGDwm45 @104 NONAME
++    NestGDwm46 @105 NONAME
++    NestGDwm47 @106 NONAME
++    NestGDwm48 @107 NONAME
++    NestGDwm49 @108 NONAME
++    NestGDwm50 @109 NONAME
++    NestGDwm51 @110 NONAME
++    NestGDwm52 @112 NONAME
++    NestGDwm53 @113 NONAME
++    NestGDwm54 @114 NONAME
++    NestGDwm55 @124 NONAME
++    NestGDwm56 @132 NONAME
++    NestGDwm57 @138 NONAME
++    NestGDwm58 @139 NONAME
++    NestGDwm59 @140 NONAME
++    NestGDwm60 @141 NONAME
++    NestGDwm61 @142 NONAME
++    NestGDwm62 @144 NONAME
++    NestGDwm63 @145 NONAME
++    NestGDwm64 @146 NONAME
++    NestGDwm65 @147 NONAME
++    NestGDwm66 @148 NONAME
++    NestGDwm67 @150 NONAME
++    NestGDwm68 @151 NONAME
++    NestGDwm69 @152 NONAME
++    NestGDwm70 @153 NONAME
++    NestGDwm71 @154 NONAME
++    NestGDwm72 @155 NONAME
++    NestGDwm73 @157 NONAME
++    NestGDwm74 @158 NONAME
++    NestGDwm75 @159 NONAME
++    NestGDwm76 @160 NONAME
++    NestGDwm77 @161 NONAME
++    NestGDwm78 @162 NONAME
++    NestGDwm79 @163 NONAME
++    NestGDwm80 @164 NONAME
++    NestGDwm81 @165 NONAME
++    NestGDwm82 @166 NONAME
++    NestGDwm83 @167 NONAME
++    NestGDwm84 @168 NONAME
++    NestGDwm85 @169 NONAME
++    NestGDwm86 @170 NONAME
++    NestGDwm87 @171 NONAME
++    NestGDwm88 @172 NONAME
++    NestGDwm89 @173 NONAME
++    NestGDwm90 @174 NONAME
++    NestGDwm91 @175 NONAME
++    NestGDwm92 @176 NONAME
++    NestGDwm93 @177 NONAME
++    NestGDwm94 @178 NONAME
++    NestGDwm95 @179 NONAME
++    NestGDwm96 @180 NONAME
++    NestGDwm97 @181 NONAME
++    NestGDwm98 @182 NONAME
++    NestGDwm99 @184 NONAME
++    NestGDwm100 @185 NONAME
++    NestGDwm101 @186 NONAME
++    NestGDwm102 @187 NONAME
+diff --git a/src/dwmapi/exports.inc b/src/dwmapi/exports.inc
+new file mode 100644
+index 0000000..f61ca41
+--- /dev/null
++++ b/src/dwmapi/exports.inc
+@@ -0,0 +1,103 @@
++    "DllCanUnloadNow",
++    "DllGetClassObject",
++    "DwmAttachMilContent",
++    "DwmDefWindowProc",
++    "DwmDetachMilContent",
++    "DwmEnableBlurBehindWindow",
++    "DwmEnableComposition",
++    "DwmEnableMMCSS",
++    "DwmExtendFrameIntoClientArea",
++    "DwmFlush",
++    "DwmGetColorizationColor",
++    "DwmGetCompositionTimingInfo",
++    "DwmGetGraphicsStreamClient",
++    "DwmGetGraphicsStreamTransformHint",
++    "DwmGetTransportAttributes",
++    "DwmGetUnmetTabRequirements",
++    "DwmGetWindowAttribute",
++    "DwmInvalidateIconicBitmaps",
++    "DwmIsCompositionEnabled",
++    "DwmModifyPreviousDxFrameDuration",
++    "DwmQueryThumbnailSourceSize",
++    "DwmRegisterThumbnail",
++    "DwmRenderGesture",
++    "DwmSetDxFrameDuration",
++    "DwmSetIconicLivePreviewBitmap",
++    "DwmSetIconicThumbnail",
++    "DwmSetPresentParameters",
++    "DwmSetWindowAttribute",
++    "DwmShowContact",
++    "DwmTetherContact",
++    "DwmTetherTextContact",
++    "DwmTransitionOwnedWindow",
++    "DwmUnregisterThumbnail",
++    "DwmUpdateThumbnailProperties",
++    "DwmpAllocateSecurityDescriptor",
++    "DwmpDxGetWindowSharedSurface",
++    "DwmpDxUpdateWindowSharedSurface",
++    "DwmpDxgiIsThreadDesktopComposited",
++    "DwmpEnableDDASupport",
++    "DwmpFreeSecurityDescriptor",
++    "DwmpGetColorizationParameters",
++    "DwmpRenderFlick",
++    "DwmpSetColorizationParameters",
++    "DwmpUpdateProxyWindowForCapture",
++    MAKEINTRESOURCEA(103),
++    MAKEINTRESOURCEA(104),
++    MAKEINTRESOURCEA(105),
++    MAKEINTRESOURCEA(106),
++    MAKEINTRESOURCEA(107),
++    MAKEINTRESOURCEA(108),
++    MAKEINTRESOURCEA(109),
++    MAKEINTRESOURCEA(110),
++    MAKEINTRESOURCEA(112),
++    MAKEINTRESOURCEA(113),
++    MAKEINTRESOURCEA(114),
++    MAKEINTRESOURCEA(124),
++    MAKEINTRESOURCEA(132),
++    MAKEINTRESOURCEA(138),
++    MAKEINTRESOURCEA(139),
++    MAKEINTRESOURCEA(140),
++    MAKEINTRESOURCEA(141),
++    MAKEINTRESOURCEA(142),
++    MAKEINTRESOURCEA(144),
++    MAKEINTRESOURCEA(145),
++    MAKEINTRESOURCEA(146),
++    MAKEINTRESOURCEA(147),
++    MAKEINTRESOURCEA(148),
++    MAKEINTRESOURCEA(150),
++    MAKEINTRESOURCEA(151),
++    MAKEINTRESOURCEA(152),
++    MAKEINTRESOURCEA(153),
++    MAKEINTRESOURCEA(154),
++    MAKEINTRESOURCEA(155),
++    MAKEINTRESOURCEA(157),
++    MAKEINTRESOURCEA(158),
++    MAKEINTRESOURCEA(159),
++    MAKEINTRESOURCEA(160),
++    MAKEINTRESOURCEA(161),
++    MAKEINTRESOURCEA(162),
++    MAKEINTRESOURCEA(163),
++    MAKEINTRESOURCEA(164),
++    MAKEINTRESOURCEA(165),
++    MAKEINTRESOURCEA(166),
++    MAKEINTRESOURCEA(167),
++    MAKEINTRESOURCEA(168),
++    MAKEINTRESOURCEA(169),
++    MAKEINTRESOURCEA(170),
++    MAKEINTRESOURCEA(171),
++    MAKEINTRESOURCEA(172),
++    MAKEINTRESOURCEA(173),
++    MAKEINTRESOURCEA(174),
++    MAKEINTRESOURCEA(175),
++    MAKEINTRESOURCEA(176),
++    MAKEINTRESOURCEA(177),
++    MAKEINTRESOURCEA(178),
++    MAKEINTRESOURCEA(179),
++    MAKEINTRESOURCEA(180),
++    MAKEINTRESOURCEA(181),
++    MAKEINTRESOURCEA(182),
++    MAKEINTRESOURCEA(184),
++    MAKEINTRESOURCEA(185),
++    MAKEINTRESOURCEA(186),
++    MAKEINTRESOURCEA(187),
+diff --git a/src/dwmapi/thunks.asm b/src/dwmapi/thunks.asm
+new file mode 100644
+index 0000000..05fedc2
+--- /dev/null
++++ b/src/dwmapi/thunks.asm
+@@ -0,0 +1,136 @@
++; Preserve the Windows x64 argument registers, floating-point arguments and stack.
++; Tail-jump to the actual System32 export without inventing undocumented ABIs.
++EXTERN NestGResolveDwm:PROC
++.code
++DWM_THUNK MACRO index
++PUBLIC NestGDwm&index
++NestGDwm&index PROC FRAME
++    sub rsp, 0A8h
++    .allocstack 0A8h
++    .endprolog
++    mov [rsp+20h], rcx
++    mov [rsp+28h], rdx
++    mov [rsp+30h], r8
++    mov [rsp+38h], r9
++    movdqu [rsp+40h], xmm0
++    movdqu [rsp+50h], xmm1
++    movdqu [rsp+60h], xmm2
++    movdqu [rsp+70h], xmm3
++    mov ecx, index
++    call NestGResolveDwm
++    mov rcx, [rsp+20h]
++    mov rdx, [rsp+28h]
++    mov r8, [rsp+30h]
++    mov r9, [rsp+38h]
++    movdqu xmm0, [rsp+40h]
++    movdqu xmm1, [rsp+50h]
++    movdqu xmm2, [rsp+60h]
++    movdqu xmm3, [rsp+70h]
++    add rsp, 0A8h
++    jmp rax
++NestGDwm&index ENDP
++ENDM
++DWM_THUNK 0
++DWM_THUNK 1
++DWM_THUNK 2
++DWM_THUNK 3
++DWM_THUNK 4
++DWM_THUNK 5
++DWM_THUNK 6
++DWM_THUNK 7
++DWM_THUNK 8
++DWM_THUNK 9
++DWM_THUNK 10
++DWM_THUNK 11
++DWM_THUNK 12
++DWM_THUNK 13
++DWM_THUNK 14
++DWM_THUNK 15
++DWM_THUNK 16
++DWM_THUNK 17
++DWM_THUNK 18
++DWM_THUNK 19
++DWM_THUNK 20
++DWM_THUNK 21
++DWM_THUNK 22
++DWM_THUNK 23
++DWM_THUNK 24
++DWM_THUNK 25
++DWM_THUNK 26
++DWM_THUNK 27
++DWM_THUNK 28
++DWM_THUNK 29
++DWM_THUNK 30
++DWM_THUNK 31
++DWM_THUNK 32
++DWM_THUNK 33
++DWM_THUNK 34
++DWM_THUNK 35
++DWM_THUNK 36
++DWM_THUNK 37
++DWM_THUNK 38
++DWM_THUNK 39
++DWM_THUNK 40
++DWM_THUNK 41
++DWM_THUNK 42
++DWM_THUNK 43
++DWM_THUNK 44
++DWM_THUNK 45
++DWM_THUNK 46
++DWM_THUNK 47
++DWM_THUNK 48
++DWM_THUNK 49
++DWM_THUNK 50
++DWM_THUNK 51
++DWM_THUNK 52
++DWM_THUNK 53
++DWM_THUNK 54
++DWM_THUNK 55
++DWM_THUNK 56
++DWM_THUNK 57
++DWM_THUNK 58
++DWM_THUNK 59
++DWM_THUNK 60
++DWM_THUNK 61
++DWM_THUNK 62
++DWM_THUNK 63
++DWM_THUNK 64
++DWM_THUNK 65
++DWM_THUNK 66
++DWM_THUNK 67
++DWM_THUNK 68
++DWM_THUNK 69
++DWM_THUNK 70
++DWM_THUNK 71
++DWM_THUNK 72
++DWM_THUNK 73
++DWM_THUNK 74
++DWM_THUNK 75
++DWM_THUNK 76
++DWM_THUNK 77
++DWM_THUNK 78
++DWM_THUNK 79
++DWM_THUNK 80
++DWM_THUNK 81
++DWM_THUNK 82
++DWM_THUNK 83
++DWM_THUNK 84
++DWM_THUNK 85
++DWM_THUNK 86
++DWM_THUNK 87
++DWM_THUNK 88
++DWM_THUNK 89
++DWM_THUNK 90
++DWM_THUNK 91
++DWM_THUNK 92
++DWM_THUNK 93
++DWM_THUNK 94
++DWM_THUNK 95
++DWM_THUNK 96
++DWM_THUNK 97
++DWM_THUNK 98
++DWM_THUNK 99
++DWM_THUNK 100
++DWM_THUNK 101
++DWM_THUNK 102
++END
+diff --git a/src/xinput1_4/xinput1_4.cpp b/src/xinput1_4/xinput1_4.cpp
+index e4847ee..5166097 100644
+--- a/src/xinput1_4/xinput1_4.cpp
++++ b/src/xinput1_4/xinput1_4.cpp
+@@ -2,6 +2,7 @@
+ #include <windows.h>
+ #include <cstring>
+ #include <string>
++#include "../NestG/ProxyBootstrap.h"
+ 
+ // ─── 1. Real XInput Function Pointers ───────────────────────────
+ static HMODULE g_hRealXInput = nullptr;
+@@ -32,14 +33,13 @@ static FARPROC o_104 = nullptr; // XInputGetBaseBusInformation
+ static FARPROC o_108 = nullptr; // XInputGetAudioDeviceIdsEx
+ 
+ // ─── 2. Core Initialization (Binding to the real System32 file) ───
+-void LoadRealXInput() {
+-    if (g_hRealXInput) return;
++BOOL CALLBACK InitializeRealXInput(PINIT_ONCE, PVOID, PVOID*) {
+ 
+-    char sysDir[MAX_PATH];
+-    GetSystemDirectoryA(sysDir, MAX_PATH);
+-    std::string realPath = std::string(sysDir) + "\\xinput1_4.dll";
++    wchar_t sysDir[MAX_PATH];
++    if (!GetSystemDirectoryW(sysDir, MAX_PATH)) return TRUE;
++    std::wstring realPath = std::wstring(sysDir) + L"\\xinput1_4.dll";
+ 
+-    g_hRealXInput = LoadLibraryA(realPath.c_str());
++    g_hRealXInput = LoadLibraryExW(realPath.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+     if (g_hRealXInput) {
+         // Load Standard API
+         o_XInputGetState = (XInputGetState_t)GetProcAddress(g_hRealXInput, "XInputGetState");
+@@ -58,85 +58,75 @@ void LoadRealXInput() {
+         o_104 = GetProcAddress(g_hRealXInput, (LPCSTR)104);
+         o_108 = GetProcAddress(g_hRealXInput, (LPCSTR)108);
+     }
++    else NestGStartup::Write("xinput.system.failed", GetLastError());
++    return TRUE;
++}
++void LoadRealXInput() {
++    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
++    InitOnceExecuteOnce(&once, InitializeRealXInput, nullptr, nullptr);
+ }
+ 
+ // ─── 3. Native Exports (Safely passing data to the game) ──────────
+ extern "C" {
+     // Standard Functions
+     DWORD WINAPI XInputGetState(DWORD dwUserIndex, void* pState) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_XInputGetState ? o_XInputGetState(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+     DWORD WINAPI XInputSetState(DWORD dwUserIndex, void* pVibration) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_XInputSetState ? o_XInputSetState(dwUserIndex, pVibration) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+     DWORD WINAPI XInputGetCapabilities(DWORD dwUserIndex, DWORD dwFlags, void* pCapabilities) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_XInputGetCapabilities ? o_XInputGetCapabilities(dwUserIndex, dwFlags, pCapabilities) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+     void WINAPI XInputEnable(BOOL enable) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         if (o_XInputEnable) o_XInputEnable(enable);
+     }
+     DWORD WINAPI XInputGetAudioDeviceIds(DWORD dwUserIndex, LPWSTR pRenderDeviceId, UINT* pRenderCount, LPWSTR pCaptureDeviceId, UINT* pCaptureCount) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_XInputGetAudioDeviceIds ? o_XInputGetAudioDeviceIds(dwUserIndex, pRenderDeviceId, pRenderCount, pCaptureDeviceId, pCaptureCount) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+     DWORD WINAPI XInputGetBatteryInformation(DWORD dwUserIndex, BYTE devType, void* pBatteryInformation) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_XInputGetBatteryInformation ? o_XInputGetBatteryInformation(dwUserIndex, devType, pBatteryInformation) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+     DWORD WINAPI XInputGetKeystroke(DWORD dwUserIndex, DWORD dwReserved, void* pKeystroke) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_XInputGetKeystroke ? o_XInputGetKeystroke(dwUserIndex, dwReserved, pKeystroke) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+ 
+     // Undocumented Ordinal Wrappers
+     DWORD WINAPI XInputOrdinal100(DWORD a1, void* a2) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_100 ? ((DWORD(WINAPI*)(DWORD, void*))o_100)(a1, a2) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+     DWORD WINAPI XInputOrdinal101(DWORD a1, DWORD a2, void* a3) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_101 ? ((DWORD(WINAPI*)(DWORD, DWORD, void*))o_101)(a1, a2, a3) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+     DWORD WINAPI XInputOrdinal102(DWORD a1) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_102 ? ((DWORD(WINAPI*)(DWORD))o_102)(a1) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+     DWORD WINAPI XInputOrdinal103(DWORD a1) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_103 ? ((DWORD(WINAPI*)(DWORD))o_103)(a1) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+     DWORD WINAPI XInputOrdinal104(DWORD a1, void* a2) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_104 ? ((DWORD(WINAPI*)(DWORD, void*))o_104)(a1, a2) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+     DWORD WINAPI XInputOrdinal108(DWORD a1, void* a2, void* a3, void* a4, void* a5) {
+-        if (!g_hRealXInput) LoadRealXInput();
++        LoadRealXInput();
+         return o_108 ? ((DWORD(WINAPI*)(DWORD, void*, void*, void*, void*))o_108)(a1, a2, a3, a4, a5) : ERROR_DEVICE_NOT_CONNECTED;
+     }
+ }
+ 
+ // ─── 4. OpenSteamTool Injection ───────────────────────────────────
+-BOOL OpenSteamToolLoad() {
+-    char exePath[MAX_PATH];
+-    if (GetModuleFileNameA(NULL, exePath, MAX_PATH)) {
+-        const char* exeName = strrchr(exePath, '\\');
+-        exeName = exeName ? exeName + 1 : exePath;
+-        if (_stricmp(exeName, "steam.exe") != 0) return TRUE;
+-    }
+-    return LoadLibraryA("NestG.dll") != NULL;
+-}
+-
+-BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved) {
+-    switch (dwReason) {
+-    case DLL_PROCESS_ATTACH:
+-        DisableThreadLibraryCalls(hModule);
+-        LoadRealXInput();
+-        if (!OpenSteamToolLoad()) return FALSE;
+-        break;
+-    }
++BOOL APIENTRY DllMain(HMODULE module, DWORD reason, PVOID) {
++    if (reason == DLL_PROCESS_ATTACH) NestGProxy::Attach(module);
+     return TRUE;
+-}
+\ No newline at end of file
++}

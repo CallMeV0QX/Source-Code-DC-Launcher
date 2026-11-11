@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/crghofficial/cloudredirect.git",
+  "commit": "4e81e492e4678c1d907fbeaef2625846f6afaad8",
+  "compatibility": {
+    "commit": "255dc01e7f3ca209dabff8d32789e5d4ba779d1f",
+    "reviewUrl": "https://github.com/crghofficial/cloudredirect/pull/2",
+    "patch": "cloudredirect-steam-compatibility.patch",
+    "sha256": "463F5DF658E739833D5A308388D37303EB7D13048380466385EEA38B18CF61E8"
+  }
+}

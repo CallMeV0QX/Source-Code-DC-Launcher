@@ -1,0 +1,20 @@
+{
+    "bundleVersion":  "1.0.15",
+    "nativeVersion":  "1.0.4-nestg.11",
+    "baseBundleVersion":  "1.0.14",
+    "upstreamCommit":  "4747385bdc7c92fb422e63419a5093566b3bf626",
+    "mainDllSha256":  "4F6FBC6FA4F253D227A4CA3609F99607705AD180F550D92B8E8CF9DF76FF722D",
+    "runtimeUpdaterSha256":  "1CF2732F1326B351871CA06942A77C1249204ACFACAC687CCB47CDCBC22420BF",
+    "compiler":  "LLVM-MinGW 20261020 UCRT x86_64, clang 23.1.4",
+    "compilerSha256":  "F6599825884BD087A81EF01E7A662025A9553DE01DC501C824B6C568AA4E5EC9",
+    "portabilityPatch":  "NestG/clang-runtime-portability.patch",
+    "atomicMemoryOrder":  "seq_cst (standard shared_ptr atomic free functions)",
+    "buildRecipe":  "NestG/Build-RuntimeClang.ps1",
+    "buildArguments":  "-SourceDirectory \u003cthis-source\u003e -BuildDirectory \u003cnew-build\u003e -CompilerDirectory \u003cllvm-mingw-bin\u003e -CMakeExecutable \u003ccmake.exe\u003e -NinjaExecutable \u003cninja.exe\u003e -RuntimeUpdaterSha256 1CF2732F1326B351871CA06942A77C1249204ACFACAC687CCB47CDCBC22420BF -NativeVersion 1.0.4-nestg.11",
+    "sourcePackageArguments":  "-ReleaseVersion 1.0.15 -IncludeClangPortability",
+    "upstreamUpdaterEnabled":  false,
+    "stableBootstrapRebuilt":  false,
+    "realSteamTested":  false,
+    "versionOnlyBuild":  true,
+    "nativeSourceFilesByteIdenticalToPrevious":  158
+}

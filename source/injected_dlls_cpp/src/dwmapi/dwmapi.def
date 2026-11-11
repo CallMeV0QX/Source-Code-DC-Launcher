@@ -1,0 +1,105 @@
+LIBRARY dwmapi
+EXPORTS
+    DllCanUnloadNow=NestGDwm0 @111
+    DllGetClassObject=NestGDwm1 @115
+    DwmAttachMilContent=NestGDwm2 @116
+    DwmDefWindowProc=NestGDwm3 @117
+    DwmDetachMilContent=NestGDwm4 @118
+    DwmEnableBlurBehindWindow=NestGDwm5 @119
+    DwmEnableComposition=NestGDwm6 @102
+    DwmEnableMMCSS=NestGDwm7 @120
+    DwmExtendFrameIntoClientArea=NestGDwm8 @121
+    DwmFlush=NestGDwm9 @122
+    DwmGetColorizationColor=NestGDwm10 @123
+    DwmGetCompositionTimingInfo=NestGDwm11 @125
+    DwmGetGraphicsStreamClient=NestGDwm12 @126
+    DwmGetGraphicsStreamTransformHint=NestGDwm13 @129
+    DwmGetTransportAttributes=NestGDwm14 @130
+    DwmGetUnmetTabRequirements=NestGDwm15 @133
+    DwmGetWindowAttribute=NestGDwm16 @134
+    DwmInvalidateIconicBitmaps=NestGDwm17 @149
+    DwmIsCompositionEnabled=NestGDwm18 @188
+    DwmModifyPreviousDxFrameDuration=NestGDwm19 @189
+    DwmQueryThumbnailSourceSize=NestGDwm20 @190
+    DwmRegisterThumbnail=NestGDwm21 @191
+    DwmRenderGesture=NestGDwm22 @192
+    DwmSetDxFrameDuration=NestGDwm23 @193
+    DwmSetIconicLivePreviewBitmap=NestGDwm24 @194
+    DwmSetIconicThumbnail=NestGDwm25 @195
+    DwmSetPresentParameters=NestGDwm26 @196
+    DwmSetWindowAttribute=NestGDwm27 @197
+    DwmShowContact=NestGDwm28 @198
+    DwmTetherContact=NestGDwm29 @199
+    DwmTetherTextContact=NestGDwm30 @156
+    DwmTransitionOwnedWindow=NestGDwm31 @200
+    DwmUnregisterThumbnail=NestGDwm32 @201
+    DwmUpdateThumbnailProperties=NestGDwm33 @202
+    DwmpAllocateSecurityDescriptor=NestGDwm34 @136
+    DwmpDxGetWindowSharedSurface=NestGDwm35 @100
+    DwmpDxUpdateWindowSharedSurface=NestGDwm36 @101
+    DwmpDxgiIsThreadDesktopComposited=NestGDwm37 @128
+    DwmpEnableDDASupport=NestGDwm38 @143
+    DwmpFreeSecurityDescriptor=NestGDwm39 @137
+    DwmpGetColorizationParameters=NestGDwm40 @127
+    DwmpRenderFlick=NestGDwm41 @135
+    DwmpSetColorizationParameters=NestGDwm42 @131
+    DwmpUpdateProxyWindowForCapture=NestGDwm43 @183
+    NestGDwm44 @103 NONAME
+    NestGDwm45 @104 NONAME
+    NestGDwm46 @105 NONAME
+    NestGDwm47 @106 NONAME
+    NestGDwm48 @107 NONAME
+    NestGDwm49 @108 NONAME
+    NestGDwm50 @109 NONAME
+    NestGDwm51 @110 NONAME
+    NestGDwm52 @112 NONAME
+    NestGDwm53 @113 NONAME
+    NestGDwm54 @114 NONAME
+    NestGDwm55 @124 NONAME
+    NestGDwm56 @132 NONAME
+    NestGDwm57 @138 NONAME
+    NestGDwm58 @139 NONAME
+    NestGDwm59 @140 NONAME
+    NestGDwm60 @141 NONAME
+    NestGDwm61 @142 NONAME
+    NestGDwm62 @144 NONAME
+    NestGDwm63 @145 NONAME
+    NestGDwm64 @146 NONAME
+    NestGDwm65 @147 NONAME
+    NestGDwm66 @148 NONAME
+    NestGDwm67 @150 NONAME
+    NestGDwm68 @151 NONAME
+    NestGDwm69 @152 NONAME
+    NestGDwm70 @153 NONAME
+    NestGDwm71 @154 NONAME
+    NestGDwm72 @155 NONAME
+    NestGDwm73 @157 NONAME
+    NestGDwm74 @158 NONAME
+    NestGDwm75 @159 NONAME
+    NestGDwm76 @160 NONAME
+    NestGDwm77 @161 NONAME
+    NestGDwm78 @162 NONAME
+    NestGDwm79 @163 NONAME
+    NestGDwm80 @164 NONAME
+    NestGDwm81 @165 NONAME
+    NestGDwm82 @166 NONAME
+    NestGDwm83 @167 NONAME
+    NestGDwm84 @168 NONAME
+    NestGDwm85 @169 NONAME
+    NestGDwm86 @170 NONAME
+    NestGDwm87 @171 NONAME
+    NestGDwm88 @172 NONAME
+    NestGDwm89 @173 NONAME
+    NestGDwm90 @174 NONAME
+    NestGDwm91 @175 NONAME
+    NestGDwm92 @176 NONAME
+    NestGDwm93 @177 NONAME
+    NestGDwm94 @178 NONAME
+    NestGDwm95 @179 NONAME
+    NestGDwm96 @180 NONAME
+    NestGDwm97 @181 NONAME
+    NestGDwm98 @182 NONAME
+    NestGDwm99 @184 NONAME
+    NestGDwm100 @185 NONAME
+    NestGDwm101 @186 NONAME
+    NestGDwm102 @187 NONAME

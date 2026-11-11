@@ -1,0 +1,3379 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index e63f5aa..7eacf52 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1,236 +1,244 @@
+-cmake_minimum_required(VERSION 3.20)
+-project(OpenSteamTool VERSION 1.0.0 LANGUAGES C CXX)
+-
+-set(CMAKE_CXX_STANDARD 20)
+-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+-set(CMAKE_C_STANDARD 11)
+-set(OPENSTEAMTOOL_VERSION "${PROJECT_VERSION}" CACHE STRING "Version string embedded into OpenSteamTool.dll")
+-
+-# Allow CMAKE_MSVC_RUNTIME_LIBRARY to control runtime selection for all targets,
+-# including dependencies pulled in via FetchContent.
+-if(POLICY CMP0091)
+-    cmake_policy(SET CMP0091 NEW)
+-endif()
+-
+-# Static MSVC runtime everywhere, so the resulting DLL has no extra runtime
+-# dependencies. Must be set BEFORE FetchContent_MakeAvailable so the fetched
+-# deps (Lua, Detours, spdlog) inherit it.
+-set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
+-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+-
+-
+-if(NOT WIN32)
+-    message(STATUS "OpenSteamTool: no targets on non-Windows platforms; skipping.")
+-    return()
+-endif()
+-
+-file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+-configure_file(
+-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/OpenSteamToolBuildInfo.h.in"
+-    "${CMAKE_CURRENT_BINARY_DIR}/generated/OpenSteamToolBuildInfo.h"
+-    @ONLY
+-)
+-
+-# ---------------------------------------------------------------------------
+-# Dependency recipes (FetchContent-backed, cached at <repo>/.deps).
+-# ---------------------------------------------------------------------------
+-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+-set(OPENSTEAMTOOL_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tools")
+-include(Lua)
+-include(Spdlog)
+-include(Protobuf)
+-include(Tomlplusplus)
+-include(LogMacros)
+-
+-# Build the host code generators (ipc_codegen) in their own binary subtree so
+-# their executables never land in the shipped output directory. EXCLUDE_FROM_ALL
+-# means only the tools actually depended on (ipc_codegen) get built here.
+-add_subdirectory("${OPENSTEAMTOOL_TOOLS_DIR}" "${CMAKE_BINARY_DIR}/tools" EXCLUDE_FROM_ALL)
+-include("${OPENSTEAMTOOL_TOOLS_DIR}/cmake/IPCCodegen.cmake")
+-
+-set(IPC_IDL "${CMAKE_CURRENT_SOURCE_DIR}/Steam/IPCMessages.steamd")
+-# Per-config output dir, mirroring the protobuf recipe below: a Multi-Config
+-# build invokes the generator once per config, and a single shared output file
+-# would ping-pong between the Release/Debug graphs and force needless rebuilds.
+-opensteamtool_add_ipc_codegen(IPC_GEN
+-    IDL "${IPC_IDL}"
+-    CPP_OUT "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>"
+-)
+-
+-# ---------------------------------------------------------------------------
+-# Protobuf code generation — one variant per config, from the same .proto:
+-#
+-#   Debug   → full Message     (protoc --cpp_out)       → links libprotobuf
+-#   Release → lite MessageLite (protoc --cpp_out=lite:) → links libprotobuf-lite
+-#
+-# Output lands in the per-config generated/ dir (same root as the IPC header),
+-# so each config owns its own files. A shared output path would ping-pong
+-# between the Release/Debug graphs (the command embeds the config-specific
+-# protoc path) and force a regen + recompile on every config switch.
+-# ---------------------------------------------------------------------------
+-set(PROTO_SRC "${CMAKE_CURRENT_SOURCE_DIR}/proto/steam_messages.proto")
+-set(PROTO_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>")
+-
+-add_custom_command(
+-    OUTPUT "${PROTO_GEN_DIR}/steam_messages.pb.cc"
+-           "${PROTO_GEN_DIR}/steam_messages.pb.h"
+-    COMMAND ${CMAKE_COMMAND} -E make_directory "${PROTO_GEN_DIR}"
+-    COMMAND $<TARGET_FILE:protoc>
+-        "--cpp_out=$<$<CONFIG:Release>:lite:>${PROTO_GEN_DIR}"
+-        "-I${CMAKE_CURRENT_SOURCE_DIR}/proto"
+-        "${PROTO_SRC}"
+-    DEPENDS "${PROTO_SRC}" protoc
+-    COMMENT "Generating protobuf C++ sources"
+-    VERBATIM
+-)
+-
+-# ---------------------------------------------------------------------------
+-# OSTPlatform — internal static library that owns the OS-specific backends.
+-# Its build is defined in its own module CMakeLists so this top-level file stays
+-# focused on host-level products (the DLLs) and code generation.
+-# ---------------------------------------------------------------------------
+-add_subdirectory(OSTPlatform)
+-
+-# ---------------------------------------------------------------------------
+-# Windows host artifacts: the injected hook DLL and the two loader-hijack DLLs.
+-# All Windows-only by construction (PE DLL hijacking + Win32 hooking).
+-# ---------------------------------------------------------------------------
+-
+-# OpenSteamTool — the hook DLL injected into Steam (always 64-bit).
+-add_library(OpenSteamTool SHARED
+-    dllmain.cpp
+-
+-    # Shared utilities
+-    Utils/Tickets/AppTicket.cpp
+-    Utils/Tickets/LegacyCDKey.cpp
+-    Utils/Tickets/EticketClient.cpp
+-    Utils/Config/Config.cpp
+-    Utils/Config/ConfigFileWatcher.cpp
+-    Utils/Config/LuaConfig.cpp
+-    Utils/Config/LuaFileWatcher.cpp
+-    Utils/CloudRedirect/CloudRedirectHost.cpp
+-    Utils/HookSupport/VehCommon.cpp
+-    Utils/Logging/Log.cpp
+-    Utils/SteamMetadata/IPCLoader.cpp
+-    Utils/SteamMetadata/ManifestClient.cpp
+-    Utils/SteamMetadata/ManifestCache.cpp
+-    Utils/SteamMetadata/ManifestDonor.cpp
+-    Utils/SteamMetadata/Mirror.cpp
+-    Utils/SteamMetadata/PatternLoader.cpp
+-    Utils/SteamMetadata/RemoteToml.cpp
+-    Utils/SteamMetadata/StatsClient.cpp
+-    Utils/SteamMetadata/SteamDiagnostics.cpp
+-    # NestG distribution does not ship external redemption or self-update entry points.
+-
+-    # Pipe subsystem: generic handshake registry + ProcessInspector core, plus
+-    # self-contained features that own their primitives.
+-    Pipe/PipeManager.cpp
+-    Pipe/ProcessInspector.cpp
+-    Pipe/Features/DenuvoAuth/DenuvoAuth.cpp
+-    Pipe/Features/DenuvoAuth/ProtectionScan.cpp
+-    Pipe/Features/Injection/Injection.cpp
+-
+-    # Generated IPC message structs (depends on IPCMessages.steamd via add_custom_command)
+-    "${IPC_GEN}"
+-
+-    # Per-category hook modules
+-    Hook/HookManager.cpp
+-    Hook/Hooks_CallBack.cpp
+-    Hook/Hooks_Decryption.cpp
+-    Hook/Hooks_IPC.cpp
+-    Hook/Hooks_IPC_ISteamUser.cpp
+-    Hook/Hooks_IPC_ISteamUtils.cpp
+-    Hook/Hooks_KeyValues.cpp
+-    Hook/Hooks_Manifest.cpp
+-    Hook/Hooks_Misc.cpp
+-    Hook/Hooks_NetPacket.cpp
+-    Hook/PendingAPICalls.cpp
+-    Hook/Hooks_SteamUI.cpp
+-    Hook/Hooks_Package.cpp
+-
+-    # protobuf generated sources (full in Debug, lite in Release)
+-    "${PROTO_GEN_DIR}/steam_messages.pb.cc"
+-)
+-
+-set_target_properties(OpenSteamTool PROPERTIES OUTPUT_NAME "OpenSteamTool")
+-
+-# Header search path — per-config include directory
+-target_include_directories(OpenSteamTool PRIVATE
+-    ${CMAKE_CURRENT_SOURCE_DIR}
+-    ${CMAKE_CURRENT_BINARY_DIR}/generated
+-    ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>
+-)
+-
+-target_link_libraries(OpenSteamTool PRIVATE
+-    OSTPlatform
+-    lua_static
+-    $<$<CONFIG:Debug>:libprotobuf>
+-    $<$<CONFIG:Release>:libprotobuf-lite>
+-    tomlplusplus::tomlplusplus
+-    $<$<CONFIG:Debug>:spdlog::spdlog>
+-    Shell32
+-)
+-
+-# Logging is compiled in only for Debug; Release reduces LOG_* to no-ops.
+-target_compile_definitions(OpenSteamTool PRIVATE
+-    $<$<CONFIG:Debug>:OPENSTEAMTOOL_LOGGING_ENABLED>
+-)
+-
+-# Backend endpoint for on-demand eticket minting (strict Denuvo titles that bind
+-# their encrypted app ticket to a launch nonce). Empty by default: the feature is
+-# off and the DLL never makes a network request. Point your own build at your own
+-# backend and the resulting DLL is self-contained, no Lua config needed:
+-#
+-#   cmake -B build -DOST_ETICKET_URL="https://your-host/eticket"
+-#
+-# Left out of the source deliberately so no single deployment's backend ships
+-# baked into a public tree. seteticketurl() in the Lua config overrides it.
+-set(OST_ETICKET_URL "" CACHE STRING
+-    "Backend URL for on-demand eticket minting (empty disables the feature)")
+-if(OST_ETICKET_URL)
+-    target_compile_definitions(OpenSteamTool PRIVATE
+-        OST_ETICKET_URL="${OST_ETICKET_URL}")
+-endif()
+-
+-# Self-update. On by default; the updater checks for a newer DLL on a detached
+-# thread at startup and stages it for the next launch. Turn it off to produce a
+-# build that never checks and never phones home:
+-#
+-#   cmake -B build -DOST_ENABLE_UPDATER=OFF
+-#
+-# This is a compile-time cut, not a runtime setting: with it off, the updater is
+-# not reachable at all and [update] enabled in opensteamtool.toml has no effect.
+-# Use it for private or pinned builds that must not be replaced under the user.
+-option(OST_ENABLE_UPDATER "Compile in the self-updater" OFF)
+-if(OST_ENABLE_UPDATER)
+-    message(FATAL_ERROR "NestG pinned runtime must not enable the native updater")
+-endif()
+-
+-# Base URL of the Tokeer code server used by the bst:// bridge (code redemption).
+-# Overridable per build; defaults to the public host when unset.
+-#   cmake -B build -DOST_TOKEER_URL="https://luastools.xyz"
+-set(OST_TOKEER_URL "" CACHE STRING
+-    "Base URL for the Tokeer code server (bst:// bridge)")
+-if(OST_TOKEER_URL)
+-    target_compile_definitions(OpenSteamTool PRIVATE
+-        OST_TOKEER_URL="${OST_TOKEER_URL}")
+-endif()
+-
+-# ---------------------------------------------------------------------------
+-# dwmapi.dll hijack — small loader DLL placed alongside Steam.
+-# ---------------------------------------------------------------------------
+-enable_language(ASM_MASM)
+-add_library(dwmapi SHARED
+-    dwmapi/dwmapi.cpp
+-    dwmapi/dwmapi.def
+-    dwmapi/thunks.asm
+-)
+-
+-# ---------------------------------------------------------------------------
+-# xinput1_4.dll hijack — secondary loader DLL placed alongside Steam.
+-# ---------------------------------------------------------------------------
+-add_library(xinput1_4 SHARED
+-    xinput1_4/xinput1_4.cpp
+-    xinput1_4/xinput1_4.def
+-)
++cmake_minimum_required(VERSION 3.20)
++project(OpenSteamTool VERSION 1.0.0 LANGUAGES C CXX)
++
++set(CMAKE_CXX_STANDARD 20)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++set(CMAKE_C_STANDARD 11)
++set(OPENSTEAMTOOL_VERSION "${PROJECT_VERSION}" CACHE STRING "Version string embedded into OpenSteamTool.dll")
++
++# Allow CMAKE_MSVC_RUNTIME_LIBRARY to control runtime selection for all targets,
++# including dependencies pulled in via FetchContent.
++if(POLICY CMP0091)
++    cmake_policy(SET CMP0091 NEW)
++endif()
++
++# Static MSVC runtime everywhere, so the resulting DLL has no extra runtime
++# dependencies. Must be set BEFORE FetchContent_MakeAvailable so the fetched
++# deps (Lua, Detours, spdlog) inherit it.
++set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
++set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
++set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
++
++
++if(NOT WIN32)
++    message(STATUS "OpenSteamTool: no targets on non-Windows platforms; skipping.")
++    return()
++endif()
++
++file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
++configure_file(
++    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/OpenSteamToolBuildInfo.h.in"
++    "${CMAKE_CURRENT_BINARY_DIR}/generated/OpenSteamToolBuildInfo.h"
++    @ONLY
++)
++
++# ---------------------------------------------------------------------------
++# Dependency recipes (FetchContent-backed, cached at <repo>/.deps).
++# ---------------------------------------------------------------------------
++list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
++set(OPENSTEAMTOOL_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tools")
++include(Lua)
++include(Spdlog)
++include(Protobuf)
++include(Tomlplusplus)
++include(LogMacros)
++
++# Build the host code generators (ipc_codegen) in their own binary subtree so
++# their executables never land in the shipped output directory. EXCLUDE_FROM_ALL
++# means only the tools actually depended on (ipc_codegen) get built here.
++add_subdirectory("${OPENSTEAMTOOL_TOOLS_DIR}" "${CMAKE_BINARY_DIR}/tools" EXCLUDE_FROM_ALL)
++include("${OPENSTEAMTOOL_TOOLS_DIR}/cmake/IPCCodegen.cmake")
++
++set(IPC_IDL "${CMAKE_CURRENT_SOURCE_DIR}/Steam/IPCMessages.steamd")
++# Per-config output dir, mirroring the protobuf recipe below: a Multi-Config
++# build invokes the generator once per config, and a single shared output file
++# would ping-pong between the Release/Debug graphs and force needless rebuilds.
++opensteamtool_add_ipc_codegen(IPC_GEN
++    IDL "${IPC_IDL}"
++    CPP_OUT "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>"
++)
++
++# ---------------------------------------------------------------------------
++# Protobuf code generation — one variant per config, from the same .proto:
++#
++#   Debug   → full Message     (protoc --cpp_out)       → links libprotobuf
++#   Release → lite MessageLite (protoc --cpp_out=lite:) → links libprotobuf-lite
++#
++# Output lands in the per-config generated/ dir (same root as the IPC header),
++# so each config owns its own files. A shared output path would ping-pong
++# between the Release/Debug graphs (the command embeds the config-specific
++# protoc path) and force a regen + recompile on every config switch.
++# ---------------------------------------------------------------------------
++set(PROTO_SRC "${CMAKE_CURRENT_SOURCE_DIR}/proto/steam_messages.proto")
++set(PROTO_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>")
++
++add_custom_command(
++    OUTPUT "${PROTO_GEN_DIR}/steam_messages.pb.cc"
++           "${PROTO_GEN_DIR}/steam_messages.pb.h"
++    COMMAND ${CMAKE_COMMAND} -E make_directory "${PROTO_GEN_DIR}"
++    COMMAND $<TARGET_FILE:protoc>
++        "--cpp_out=$<$<CONFIG:Release>:lite:>${PROTO_GEN_DIR}"
++        "-I${CMAKE_CURRENT_SOURCE_DIR}/proto"
++        "${PROTO_SRC}"
++    DEPENDS "${PROTO_SRC}" protoc
++    COMMENT "Generating protobuf C++ sources"
++    VERBATIM
++)
++
++# ---------------------------------------------------------------------------
++# OSTPlatform — internal static library that owns the OS-specific backends.
++# Its build is defined in its own module CMakeLists so this top-level file stays
++# focused on host-level products (the DLLs) and code generation.
++# ---------------------------------------------------------------------------
++add_subdirectory(OSTPlatform)
++
++# ---------------------------------------------------------------------------
++# Windows host artifacts: the injected hook DLL and the two loader-hijack DLLs.
++# All Windows-only by construction (PE DLL hijacking + Win32 hooking).
++# ---------------------------------------------------------------------------
++
++# OpenSteamTool — the hook DLL injected into Steam (always 64-bit).
++add_library(OpenSteamTool SHARED
++    dllmain.cpp
++    NestG/RentalIdentity.cpp
++    NestG/RentalRuntime.cpp
++    NestG/RentalStatusPipe.cpp
++
++    # Shared utilities
++    Utils/Tickets/AppTicket.cpp
++    Utils/Tickets/LegacyCDKey.cpp
++    Utils/Tickets/EticketClient.cpp
++    Utils/Config/Config.cpp
++    Utils/Config/ConfigFileWatcher.cpp
++    Utils/Config/LuaConfig.cpp
++    Utils/Config/LuaFileWatcher.cpp
++    Utils/CloudRedirect/CloudRedirectHost.cpp
++    Utils/HookSupport/VehCommon.cpp
++    Utils/Logging/Log.cpp
++    Utils/SteamMetadata/IPCLoader.cpp
++    Utils/SteamMetadata/ManifestClient.cpp
++    Utils/SteamMetadata/ManifestCache.cpp
++    Utils/SteamMetadata/ManifestDonor.cpp
++    Utils/SteamMetadata/Mirror.cpp
++    Utils/SteamMetadata/PatternLoader.cpp
++    Utils/SteamMetadata/RemoteToml.cpp
++    Utils/SteamMetadata/StatsClient.cpp
++    Utils/SteamMetadata/SteamDiagnostics.cpp
++    # NestG distribution does not ship external redemption or self-update entry points.
++
++    # Pipe subsystem: generic handshake registry + ProcessInspector core, plus
++    # self-contained features that own their primitives.
++    Pipe/PipeManager.cpp
++    Pipe/ProcessInspector.cpp
++    Pipe/Features/DenuvoAuth/DenuvoAuth.cpp
++    Pipe/Features/DenuvoAuth/ProtectionScan.cpp
++    Pipe/Features/Injection/Injection.cpp
++
++    # Generated IPC message structs (depends on IPCMessages.steamd via add_custom_command)
++    "${IPC_GEN}"
++
++    # Per-category hook modules
++    Hook/HookManager.cpp
++    Hook/Hooks_CallBack.cpp
++    Hook/Hooks_Decryption.cpp
++    Hook/Hooks_IPC.cpp
++    Hook/Hooks_IPC_ISteamUser.cpp
++    Hook/Hooks_IPC_ISteamUtils.cpp
++    Hook/Hooks_KeyValues.cpp
++    Hook/Hooks_Manifest.cpp
++    Hook/Hooks_Misc.cpp
++    Hook/Hooks_NetPacket.cpp
++    Hook/PendingAPICalls.cpp
++    Hook/Hooks_SteamUI.cpp
++    Hook/Hooks_Package.cpp
++
++    # protobuf generated sources (full in Debug, lite in Release)
++    "${PROTO_GEN_DIR}/steam_messages.pb.cc"
++)
++
++set_target_properties(OpenSteamTool PROPERTIES OUTPUT_NAME "OpenSteamTool")
++
++# Header search path — per-config include directory
++target_include_directories(OpenSteamTool PRIVATE
++    ${CMAKE_CURRENT_SOURCE_DIR}
++    ${CMAKE_CURRENT_BINARY_DIR}/generated
++    ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>
++)
++
++target_link_libraries(OpenSteamTool PRIVATE
++    OSTPlatform
++    lua_static
++    $<$<CONFIG:Debug>:libprotobuf>
++    $<$<CONFIG:Release>:libprotobuf-lite>
++    tomlplusplus::tomlplusplus
++    $<$<CONFIG:Debug>:spdlog::spdlog>
++    Shell32
++    Crypt32
++    Bcrypt
++    Winhttp
++    Ole32
++    Advapi32
++)
++
++# Logging is compiled in only for Debug; Release reduces LOG_* to no-ops.
++target_compile_definitions(OpenSteamTool PRIVATE
++    $<$<CONFIG:Debug>:OPENSTEAMTOOL_LOGGING_ENABLED>
++)
++
++# Backend endpoint for on-demand eticket minting (strict Denuvo titles that bind
++# their encrypted app ticket to a launch nonce). Empty by default: the feature is
++# off and the DLL never makes a network request. Point your own build at your own
++# backend and the resulting DLL is self-contained, no Lua config needed:
++#
++#   cmake -B build -DOST_ETICKET_URL="https://your-host/eticket"
++#
++# Left out of the source deliberately so no single deployment's backend ships
++# baked into a public tree. seteticketurl() in the Lua config overrides it.
++set(OST_ETICKET_URL "" CACHE STRING
++    "Backend URL for on-demand eticket minting (empty disables the feature)")
++if(OST_ETICKET_URL)
++    target_compile_definitions(OpenSteamTool PRIVATE
++        OST_ETICKET_URL="${OST_ETICKET_URL}")
++endif()
++
++# Self-update. On by default; the updater checks for a newer DLL on a detached
++# thread at startup and stages it for the next launch. Turn it off to produce a
++# build that never checks and never phones home:
++#
++#   cmake -B build -DOST_ENABLE_UPDATER=OFF
++#
++# This is a compile-time cut, not a runtime setting: with it off, the updater is
++# not reachable at all and [update] enabled in opensteamtool.toml has no effect.
++# Use it for private or pinned builds that must not be replaced under the user.
++option(OST_ENABLE_UPDATER "Compile in the self-updater" OFF)
++if(OST_ENABLE_UPDATER)
++    message(FATAL_ERROR "NestG pinned runtime must not enable the native updater")
++endif()
++
++# Base URL of the Tokeer code server used by the bst:// bridge (code redemption).
++# Overridable per build; defaults to the public host when unset.
++#   cmake -B build -DOST_TOKEER_URL="https://luastools.xyz"
++set(OST_TOKEER_URL "" CACHE STRING
++    "Base URL for the Tokeer code server (bst:// bridge)")
++if(OST_TOKEER_URL)
++    target_compile_definitions(OpenSteamTool PRIVATE
++        OST_TOKEER_URL="${OST_TOKEER_URL}")
++endif()
++
++# ---------------------------------------------------------------------------
++# dwmapi.dll hijack — small loader DLL placed alongside Steam.
++# ---------------------------------------------------------------------------
++enable_language(ASM_MASM)
++add_library(dwmapi SHARED
++    dwmapi/dwmapi.cpp
++    dwmapi/dwmapi.def
++    dwmapi/thunks.asm
++)
++
++# ---------------------------------------------------------------------------
++# xinput1_4.dll hijack — secondary loader DLL placed alongside Steam.
++# ---------------------------------------------------------------------------
++add_library(xinput1_4 SHARED
++    xinput1_4/xinput1_4.cpp
++    xinput1_4/xinput1_4.def
++)
+diff --git a/src/Hook/Hooks_Manifest.cpp b/src/Hook/Hooks_Manifest.cpp
+index a0ddad1..1194534 100644
+--- a/src/Hook/Hooks_Manifest.cpp
++++ b/src/Hook/Hooks_Manifest.cpp
+@@ -4,6 +4,7 @@
+ #include "OSTPlatform/include/Thread.h"
+ #include "Utils/SteamMetadata/ManifestCache.h"
+ #include "OSTPlatform/include/Dialog.h"
++#include "NestG/RentalRuntime.h"
+ #include <atomic>
+ #include <chrono>
+ #include <format>
+@@ -20,6 +21,7 @@
+ //      in the output vector (replaces the old KV-tree approach).
+ // ═══════════════════════════════════════════════════════════════════
+ namespace {
++    std::atomic<bool> rentalReadReady{false};
+ 
+     // Per-fetch timeout for the on-demand pre-seed in YldLoadDepotManifest. Most
+     // manifests are Cloudflare edge hits (~100-300 ms); this cap keeps one slow or
+@@ -225,6 +227,11 @@ namespace {
+               void* a1, void* a2, int appId, uint32_t depotId,
+               uint64_t manifestGid, const char* branch)
+     {
++        // The exact read mapping is fiber-local and exists only for this call.
++        // A retail Lua contribution always uses the existing common path.
++        NestGRental::ManifestReadScope rentalScope(
++            static_cast<uint32_t>(appId), depotId, manifestGid,
++            !LuaConfig::HasRetailDepot(depotId) && !LuaConfig::HasRetailDepot(static_cast<uint32_t>(appId)));
+         // Only depots OST unlocks and does not own (lua-added, incl. workshop
+         // apps). A bounded blocking fetch: the original checks disk on the very
+         // next line, so an archive hit converts into a first-attempt success; a
+@@ -242,13 +249,24 @@ namespace {
+ namespace Hooks_Manifest {
+ 
+     void Install() {
+-        HOOK_BEGIN();
+-        INSTALL_HOOK_C(BuildDepotDependency);
+-        INSTALL_HOOK_C(YldLoadDepotManifest);
+-        HOOK_END();
++        bool ok = OSTPlatform::Detour::BeginTransaction();
++        if (!ok) return;
++        void* build = PatternLoader::FindPattern(client_hModule, "BuildDepotDependency");
++        void* load = PatternLoader::FindPattern(client_hModule, "YldLoadDepotManifest");
++        if (build) {
++            oBuildDepotDependency = reinterpret_cast<BuildDepotDependency_t>(build);
++            ok = OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&oBuildDepotDependency), reinterpret_cast<void*>(hkBuildDepotDependency)) && ok;
++        }
++        if (load) {
++            oYldLoadDepotManifest = reinterpret_cast<YldLoadDepotManifest_t>(load);
++            ok = OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&oYldLoadDepotManifest), reinterpret_cast<void*>(hkYldLoadDepotManifest)) && ok;
++        }
++        const bool committed = OSTPlatform::Detour::CommitTransaction();
++        rentalReadReady.store(ok && committed && build && load);
+     }
+ 
+     void Uninstall() {
++        rentalReadReady.store(false);
+         UNHOOK_BEGIN();
+         UNINSTALL_HOOK(BuildDepotDependency);
+         UNINSTALL_HOOK(YldLoadDepotManifest);
+@@ -264,6 +282,8 @@ namespace Hooks_Manifest {
+         return true;
+     }
+ 
++    bool RentalReadReady() { return rentalReadReady.load(); }
++
+     void ReportMissingManifest(uint32_t depotId, uint64_t gid) {
+         ReportMissing(depotId, gid);
+     }
+diff --git a/src/Hook/Hooks_Manifest.h b/src/Hook/Hooks_Manifest.h
+index e352eab..a828215 100644
+--- a/src/Hook/Hooks_Manifest.h
++++ b/src/Hook/Hooks_Manifest.h
+@@ -5,6 +5,7 @@
+ #include <cstdint>
+ 
+ namespace Hooks_Manifest {
++    bool RentalReadReady();
+     void Install();
+     void Uninstall();
+ 
+diff --git a/src/Hook/Hooks_NetPacket.cpp b/src/Hook/Hooks_NetPacket.cpp
+index 1f71642..e27159a 100644
+--- a/src/Hook/Hooks_NetPacket.cpp
++++ b/src/Hook/Hooks_NetPacket.cpp
+@@ -15,6 +15,7 @@
+ #include "Utils/Tickets/EticketClient.h"
+ #include "Utils/Support/FnvHash.h"
+ #include "Utils/CloudRedirect/CloudRedirectHost.h"
++#include "NestG/RentalIdentity.h"
+ #include "Steam/NetPacket.h"
+ #include "OSTPlatform/include/Memory.h"
+ #include <algorithm>
+@@ -1006,6 +1007,10 @@ namespace Hooks_NetPacket_Manifest {
+         const uint32 depotId     = req.depot_id();
+         const uint32 appId       = req.has_app_id() ? req.app_id() : 0;
+ 
++        // A rental has a private verified manifest source. It must not start
++        // the retail archive/code-fetch jobs whose results are process-global.
++        if (!LuaConfig::HasRetailDepot(depotId) && !LuaConfig::HasRetailDepot(appId)) return false;
++
+         // Parse the header up front: the jobid_source correlates the reply, and
+         // both the passive-capture and injection paths below need it.
+         CMsgProtoBufHeader hdr;
+@@ -1827,6 +1832,73 @@ namespace Hooks_NetPacket_LegacyKey {
+ // ════════════════════════════════════════════════════════════════
+ namespace {
+ 
++    // Run on the original frames, before any replacement/suppression performed
++    // by Better. These observers never call the network or touch rental files.
++    void ObserveRentalSend(EMsg eMsg, const uint8* pHdr, uint32 cbHdr)
++    {
++        if (eMsg == k_EMsgClientLogOff || eMsg == k_EMsgClientHello) {
++            RentalIdentity::SignOut();
++            return;
++        }
++        try {
++            CMsgProtoBufHeader hdr;
++            const bool parsed = cbHdr <= 8192 && hdr.ParseFromArray(pHdr, cbHdr);
++            if (parsed && hdr.has_session_disposition() &&
++                hdr.session_disposition() == CMsgProtoBufHeader::k_ESessionDispositionDisconnect) {
++                RentalIdentity::SignOut();
++                return;
++            }
++            if (eMsg == k_EMsgClientLogon) {
++                // The request is a pending login, never authenticated proof.
++                // Do not deserialize its body: it can carry login credentials.
++                RentalIdentity::BeginLogon(parsed && hdr.has_steamid() ? hdr.steamid() : 0);
++            } else if (parsed) {
++                RentalIdentity::ObserveAuthenticatedHeader(
++                    hdr.steamid(), hdr.client_sessionid(),
++                    hdr.has_steamid(), hdr.has_client_sessionid());
++            }
++        } catch (...) {
++            RentalIdentity::SignOut();
++        }
++    }
++
++    void ObserveRentalReceive(EMsg eMsg, const uint8* pBody, uint32 cbBody,
++                              const uint8* pHdr, uint32 cbHdr)
++    {
++        if (eMsg == k_EMsgClientLoggedOff) {
++            RentalIdentity::SignOut();
++            return;
++        }
++        try {
++            CMsgProtoBufHeader hdr;
++            if (cbHdr > 8192 || !hdr.ParseFromArray(pHdr, cbHdr)) {
++                if (eMsg == k_EMsgClientLogOnResponse) RentalIdentity::SignOut();
++                return;
++            }
++            if ((hdr.has_session_disposition() &&
++                 hdr.session_disposition() == CMsgProtoBufHeader::k_ESessionDispositionDisconnect) ||
++                (hdr.has_admin_spoofing_user() && hdr.admin_spoofing_user())) {
++                RentalIdentity::SignOut();
++                return;
++            }
++            if (eMsg == k_EMsgClientLogOnResponse) {
++                NestGRentalLogonResponse response;
++                const bool parsed = cbBody <= 65536 && response.ParseFromArray(pBody, cbBody);
++                RentalIdentity::ObserveLogonResponse(
++                    parsed && (!hdr.has_eresult() || hdr.eresult() == 1) ? response.eresult() : 2,
++                    parsed && response.has_eresult(),
++                    hdr.has_steamid() ? hdr.steamid() : 0,
++                    hdr.has_client_sessionid() ? hdr.client_sessionid() : 0);
++            } else {
++                RentalIdentity::ObserveAuthenticatedHeader(
++                    hdr.steamid(), hdr.client_sessionid(),
++                    hdr.has_steamid(), hdr.has_client_sessionid());
++            }
++        } catch (...) {
++            RentalIdentity::SignOut();
++        }
++    }
++
+     bool SendServiceJob(const char* targetJobName,
+                         const uint8* pBody, uint32 cbBody,
+                         const uint8* pHdr, uint32 cbHdr)
+@@ -2038,6 +2110,7 @@ namespace {
+         uint32 cbHdr, cbBody;
+         bool result;
+         if (UnpackRaw(pubData, cubData, eMsg, pHdr, cbHdr, pBody, cbBody)) {
++            ObserveRentalSend(eMsg, pHdr, cbHdr);
+             SendJob(eMsg, pBody, cbBody, pHdr, cbHdr);
+ 
+             if (g_SuppressSend) {
+@@ -2098,6 +2171,7 @@ namespace {
+         uint32 cbBody, cbHdr;
+         if (UnpackRaw(NetPkt::Data(pPacket), NetPkt::Size(pPacket),
+                      eMsg, pHdr, cbHdr, pBody, cbBody)) {
++            ObserveRentalReceive(eMsg, pBody, cbBody, pHdr, cbHdr);
+             g_ResizedInPlace = false;
+             RecvJob(eMsg, pBody, cbBody, pHdr, cbHdr);
+ 
+@@ -2125,14 +2199,34 @@ namespace {
+ 
+ namespace Hooks_NetPacket {
+     void Install() {
++        RentalIdentity::SetObserverAvailability(false, false);
+         RESOLVE_C(PchMsgNameFromEMsg);
+-        HOOK_BEGIN();
+-        INSTALL_HOOK_C(BBuildAndAsyncSendFrame);
+-        INSTALL_HOOK_C(RecvPkt);
+-        HOOK_END();
++        // The generic hook macros discard readiness and silently skip absent
++        // signatures. Rental authorization requires both hooks and a successful
++        // transaction, so record the actual installation result explicitly.
++        const bool began = OSTPlatform::Detour::BeginTransaction();
++        bool sendInstalled = false;
++        bool receiveInstalled = false;
++        if (began) {
++            if (void* target = PatternLoader::FindPattern(client_hModule, "BBuildAndAsyncSendFrame")) {
++                oBBuildAndAsyncSendFrame = reinterpret_cast<BBuildAndAsyncSendFrame_t>(target);
++                sendInstalled = OSTPlatform::Detour::Attach(
++                    reinterpret_cast<void**>(&oBBuildAndAsyncSendFrame),
++                    reinterpret_cast<void*>(hkBBuildAndAsyncSendFrame));
++            }
++            if (void* target = PatternLoader::FindPattern(client_hModule, "RecvPkt")) {
++                oRecvPkt = reinterpret_cast<RecvPkt_t>(target);
++                receiveInstalled = OSTPlatform::Detour::Attach(
++                    reinterpret_cast<void**>(&oRecvPkt), reinterpret_cast<void*>(hkRecvPkt));
++            }
++        }
++        const bool committed = OSTPlatform::Detour::CommitTransaction();
++        RentalIdentity::SetObserverAvailability(
++            began && committed && sendInstalled, began && committed && receiveInstalled);
+     }
+ 
+     void Uninstall() {
++        RentalIdentity::SetObserverAvailability(false, false);
+         UNHOOK_BEGIN();
+         UNINSTALL_HOOK(BBuildAndAsyncSendFrame);
+         UNINSTALL_HOOK(RecvPkt);
+diff --git a/src/Hook/Hooks_Package.cpp b/src/Hook/Hooks_Package.cpp
+index a48d491..60446e6 100644
+--- a/src/Hook/Hooks_Package.cpp
++++ b/src/Hook/Hooks_Package.cpp
+@@ -3,6 +3,8 @@
+ #include "Hooks_SteamUI.h"
+ #include "dllmain.h"
+ #include "Utils/HookSupport/VehCommon.h"
++#include "NestG/RentalRuntime.h"
++#include "NestG/RentalIdentity.h"
+ #include <algorithm>
+ #include <mutex>
+ #include <string>
+@@ -10,6 +12,13 @@
+ #include <vector>
+ 
+ namespace {
++    auto& g_packageMutex = *new std::recursive_mutex;
++    std::atomic<bool> g_rentalRefreshRequested{false};
++    std::atomic<bool> g_rentalPackageHooksReady{false};
++    std::atomic<uint64_t> g_ownershipReadyGeneration{UINT64_MAX};
++    std::unordered_set<AppId_t> g_insertedRentalIds;
++    uint64_t g_accountGeneration = UINT64_MAX;
++    thread_local bool g_reconcilingRental = false;
+     RESOLVE_FUNC(CUtlMemoryGrow,               void*, CUtlVector<AppId_t>*, int);
+     RESOLVE_FUNC(MarkLicenseAsChanged,         int64, void*, uint32, bool);
+     RESOLVE_FUNC(ProcessPendingLicenseUpdates, bool,  void*);
+@@ -59,6 +68,11 @@ namespace {
+ 
+         // Inject all depots from config into the fake license. 
+         std::vector<AppId_t> appIds = LuaConfig::GetAllDepotIds();
++        appIds.erase(std::remove_if(appIds.begin(), appIds.end(), [&](AppId_t id) {
++            for (uint32 i = 0; i < pPkg->AppIdVec.m_Size; ++i)
++                if (pPkg->AppIdVec.m_Memory.m_pMemory[i] == id) return true;
++            return false;
++        }), appIds.end());
+         if (!appIds.empty()) {
+             uint32 oldSize = pPkg->AppIdVec.m_Size;
+             uint32 numToAdd = static_cast<uint32>(appIds.size());
+@@ -67,8 +81,11 @@ namespace {
+                 LOG_PACKAGE_WARN("InitFakeLicense(PackageId={}): failed to grow AppId vector", kInjectedPackageId);
+                 return false;
+             }
+-            for (uint32 i = 0; i < numToAdd; i++)
++            const auto rental = NestGRental::Acquire();
++            for (uint32 i = 0; i < numToAdd; i++) {
+                 pPkg->AppIdVec.m_Memory.m_pMemory[oldSize + i] = appIds[i];
++                if (rental && rental->data.depotKeys.count(appIds[i]) && !LuaConfig::HasRetailDepot(appIds[i])) g_insertedRentalIds.insert(appIds[i]);
++            }
+         }
+ 
+         g_licenseInitialized = true;
+@@ -190,14 +207,79 @@ namespace {
+     }
+ 
+ 
+-    HOOK_FUNC(CheckAppOwnership, bool, void* pObj, AppId_t appId, AppOwnership* pOwn) {
+-        if (!g_pCUser) {
+-            g_pCUser = pObj;
+-            LOG_PACKAGE_DEBUG("CheckAppOwnership: captured CUser {}", g_pCUser);
++    void SynchronizeAccountGeneration() {
++        const auto generation = RentalIdentity::Capture().generation;
++        if (generation == g_accountGeneration) return;
++        g_accountGeneration = generation;
++        g_pCUser = nullptr;
++        g_pendingLicenses.clear(); g_ownedDepotsDumped = false;
++        std::lock_guard lock(g_ownedDepotsMutex);
++        g_ownedDepots.clear(); g_ownedDepotsReady = false;
++    }
++
++    using NativeOwnershipCheck = bool(__fastcall*)(void*, AppId_t, AppOwnership*);
++    void ReconcileRentalSource(NativeOwnershipCheck nativeOwnership) {
++        if (g_reconcilingRental || !CAPTURE_READY(GetPackageInfo)) return;
++        struct Reentrancy { Reentrancy() { g_reconcilingRental = true; } ~Reentrancy() { g_reconcilingRental = false; } } guard;
++        auto* currentPackage = oGetPackageInfo(g_pCPackageInfo, kInjectedPackageId, kInjectedPkgAccessToken);
++        if (!currentPackage || currentPackage->Status != EPackageStatus::Available) return;
++        if (currentPackage != g_pInjectedPackageInfo) {
++            // Never dereference a cached account object's package after Steam
++            // replaced it. Ownership records only apply to the same object.
++            g_pInjectedPackageInfo = currentPackage; g_insertedRentalIds.clear();
++            g_licenseInitialized = false; g_licenseRefreshPending = false;
++        }
++        const auto rental = NestGRental::Acquire();
++        std::vector<AppId_t> removed;
++        bool changed = false;
++        for (auto it = g_insertedRentalIds.begin(); it != g_insertedRentalIds.end();) {
++            const auto id = *it;
++            if (!rental || !rental->data.depotKeys.count(id) || LuaConfig::HasRetailDepot(id)) {
++                if (!LuaConfig::HasRetailDepot(id) && currentPackage->AppIdVec.FindAndFastRemove(id)) { removed.push_back(id); changed = true; }
++                it = g_insertedRentalIds.erase(it);
++            } else ++it;
++        }
++        std::vector<AppId_t> additions;
++        if (rental) for (const auto& [id, key] : rental->data.depotKeys) {
++            if (LuaConfig::HasRetailDepot(id)) continue;
++            bool exists = false;
++            for (uint32 i = 0; i < currentPackage->AppIdVec.m_Size; ++i)
++                if (currentPackage->AppIdVec.m_Memory.m_pMemory[i] == id) { exists = true; break; }
++            if (!exists) additions.push_back(id);
++        }
++        if (!additions.empty()) {
++            const auto oldSize = currentPackage->AppIdVec.m_Size;
++            if (CUtlMemoryGrowWrap(&currentPackage->AppIdVec, static_cast<int>(additions.size()))) {
++                for (size_t i = 0; i < additions.size(); ++i) {
++                    currentPackage->AppIdVec.m_Memory.m_pMemory[oldSize + i] = additions[i];
++                    g_insertedRentalIds.insert(additions[i]); Hooks_SteamUI::CancelRemoval(additions[i]);
++                }
++                changed = true;
++            }
++        }
++        if (changed) {
++            MarkLicenseAsChangedAndProcessUpdates();
++            for (const auto id : removed) {
++                AppOwnership original{};
++                // Keep native Steam ownership even if this game previously had
++                // a rental contribution. Only queue removal of injected games.
++                if (!g_pCUser || !nativeOwnership || !nativeOwnership(g_pCUser, id, &original) || !original.bOwnsLicense)
++                    Hooks_SteamUI::QueueRemoval(id);
++            }
+         }
++    }
++
++    HOOK_FUNC(CheckAppOwnership, bool, void* pObj, AppId_t appId, AppOwnership* pOwn) {
++        std::lock_guard lock(g_packageMutex);
++        SynchronizeAccountGeneration();
++        g_pCUser = pObj;
++        ReconcileRentalSource(oCheckAppOwnership);
+ 
+         bool result = oCheckAppOwnership(pObj, appId, pOwn);
+         TryInitFakeLicenseOnce();
++        ReconcileRentalSource(oCheckAppOwnership);
++        if (g_pInjectedPackageInfo && CAPTURE_READY(GetPackageInfo)) g_ownershipReadyGeneration.store(RentalIdentity::Capture().generation);
++        if (g_rentalRefreshRequested.exchange(false)) Hooks_Package::NotifyLicenseChanged();
+         Hooks_Package::TryDumpOwnedDepots();
+ 
+         if (LuaConfig::HasDepot(appId,false)) {
+@@ -221,11 +303,14 @@ namespace {
+ namespace Hooks_Package {
+ 
+     void OnLicenseList(std::vector<License> licenses) {
++        std::lock_guard lock(g_packageMutex);
++        SynchronizeAccountGeneration();
+         g_pendingLicenses  = std::move(licenses);
+         g_ownedDepotsDumped = false;
+     }
+ 
+     void TryDumpOwnedDepots() {
++        std::lock_guard lock(g_packageMutex);
+         if (g_ownedDepotsDumped || g_pendingLicenses.empty()) return;
+         if (!CAPTURE_READY(GetPackageInfo)) return;
+ 
+@@ -248,23 +333,45 @@ namespace Hooks_Package {
+ 
+         ARM_CAPTURE_C(GetPackageInfo);
+ 
+-        HOOK_BEGIN();
+-        INSTALL_HOOK_C(CheckAppOwnership);
+-        HOOK_END();
++        if (!OSTPlatform::Detour::BeginTransaction()) return;
++        const auto ownership = PatternLoader::FindPattern(client_hModule, "CheckAppOwnership");
++        bool attached = false;
++        if (ownership) {
++            oCheckAppOwnership = reinterpret_cast<CheckAppOwnership_t>(ownership);
++            attached = OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&oCheckAppOwnership), reinterpret_cast<void*>(hkCheckAppOwnership));
++        }
++        const bool committed = OSTPlatform::Detour::CommitTransaction();
++        g_rentalPackageHooksReady.store(attached && committed && oCUtlMemoryGrow && oMarkLicenseAsChanged && oProcessPendingLicenseUpdates);
+     }
+ 
+     void Uninstall() {
++        g_rentalPackageHooksReady.store(false);
+         UNHOOK_BEGIN();
+         UNINSTALL_HOOK_C(CheckAppOwnership);
+         UNHOOK_END();
+     }
+ 
+     void NotifyLicenseChanged() {
+-        PackageInfo* pPkg = g_pInjectedPackageInfo;
++        std::lock_guard lock(g_packageMutex);
++        const auto identity = RentalIdentity::Capture();
++        if (identity.observerReady && (identity.state != RentalIdentity::State::Authenticated ||
++            g_ownershipReadyGeneration.load() != identity.generation)) {
++            // A watcher cannot refresh an account object from the prior login.
++            g_rentalRefreshRequested.store(true); return;
++        }
++        PackageInfo* pPkg = CAPTURE_READY(GetPackageInfo) ?
++            oGetPackageInfo(g_pCPackageInfo, kInjectedPackageId, kInjectedPkgAccessToken) : nullptr;
+         if (!pPkg) {
+             LOG_PACKAGE_WARN("NotifyLicenseChanged: injected PackageInfo not ready, cannot notify");
+             return;
+         }
++        if (pPkg != g_pInjectedPackageInfo) {
++            // The captured manager can return a replacement after account
++            // switching. Forget the old pointer without dereferencing it.
++            g_pInjectedPackageInfo = pPkg; g_insertedRentalIds.clear();
++            g_licenseInitialized = false; g_licenseRefreshPending = false;
++            g_rentalRefreshRequested.store(true); return;
++        }
+ 
+         // ── Remove depots that were unloaded ──
+         std::vector<AppId_t> removals = LuaConfig::TakePendingRemovals();
+@@ -281,6 +388,11 @@ namespace Hooks_Package {
+ 
+         // ── Add depots that are newly loaded ──
+         std::vector<AppId_t> additions = LuaConfig::TakePendingAdditions();
++        additions.erase(std::remove_if(additions.begin(), additions.end(), [&](AppId_t id) {
++            for (uint32 i = 0; i < pPkg->AppIdVec.m_Size; ++i)
++                if (pPkg->AppIdVec.m_Memory.m_pMemory[i] == id) return true;
++            return false;
++        }), additions.end());
+         std::unordered_set<AppId_t> addedIds;
+         LOG_PACKAGE_DEBUG("NotifyLicenseChanged: processing {} additions", additions.size());
+         if (!additions.empty()) {
+@@ -294,6 +406,7 @@ namespace Hooks_Package {
+                 for (size_t i = 0; i < additions.size(); ++i) {
+                     pPkg->AppIdVec.m_Memory.m_pMemory[oldSize + i] = additions[i];
+                     addedIds.insert(additions[i]);
++                    if (const auto rental = NestGRental::Acquire(); rental && rental->data.depotKeys.count(additions[i]) && !LuaConfig::HasRetailDepot(additions[i])) g_insertedRentalIds.insert(additions[i]);
+                     LOG_PACKAGE_DEBUG("NotifyLicenseChanged: inserted AppId {} at [{}]", additions[i], oldSize + i);
+                 }
+             }else {
+@@ -327,4 +440,10 @@ namespace Hooks_Package {
+         LOG_PACKAGE_DEBUG("NotifyLicenseChanged: queued {} UI removals, skipped {} transient removals",
+                           queuedRemovalCount, removals.size() - queuedRemovalCount);
+     }
++    void RequestRentalRefresh() { g_rentalRefreshRequested.store(true); }
++    bool RentalIsolationReady() {
++        const auto identity = RentalIdentity::Capture();
++        return g_rentalPackageHooksReady.load() && identity.observerReady && identity.state == RentalIdentity::State::Authenticated &&
++            g_ownershipReadyGeneration.load() == identity.generation;
++    }
+ }
+diff --git a/src/Hook/Hooks_Package.h b/src/Hook/Hooks_Package.h
+index 0b2d7b5..e438a84 100644
+--- a/src/Hook/Hooks_Package.h
++++ b/src/Hook/Hooks_Package.h
+@@ -13,6 +13,10 @@ namespace Hooks_Package {
+ 
+     // Mark package 0 as changed and trigger CClientAppManager_ProcessPendingLicenseUpdates.
+     void NotifyLicenseChanged();
++    // Rental workers never dereference captured Steam objects. Apply their
++    // refresh request from a verified ownership hook on Steam's own thread.
++    void RequestRentalRefresh();
++    bool RentalIsolationReady();
+ 
+     // One entry of the license list Steam sends after logon. The access token is
+     // required: GetPackageInfo will not return a PackageInfo without it.
+diff --git a/src/NestG/ProxyBootstrap.h b/src/NestG/ProxyBootstrap.h
+index e6012db..618a900 100644
+--- a/src/NestG/ProxyBootstrap.h
++++ b/src/NestG/ProxyBootstrap.h
+@@ -1,46 +1,46 @@
+-#pragma once
+-#include "StartupDiagnostics.h"
+-
+-namespace NestGProxy {
+-inline bool IsSteamHost() noexcept {
+-    wchar_t path[32768];
+-    const DWORD length = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
+-    if (!length || length >= ARRAYSIZE(path)) return false;
+-    const wchar_t* name = wcsrchr(path, L'\\');
+-    return name && _wcsicmp(name + 1, L"steam.exe") == 0;
+-}
+-
+-inline DWORD WINAPI Initialize(void* module) noexcept {
+-    NestGStartup::Write("proxy.worker");
+-    wchar_t path[32768];
+-    DWORD length = GetModuleFileNameW(static_cast<HMODULE>(module), path, ARRAYSIZE(path));
+-    if (!length || length >= ARRAYSIZE(path) - ARRAYSIZE(L"OpenSteamTool.dll")) {
+-        NestGStartup::Write("proxy.path.failed", GetLastError()); return 0;
+-    }
+-    wchar_t* slash = wcsrchr(path, L'\\');
+-    if (!slash) { NestGStartup::Write("proxy.path.failed", ERROR_BAD_PATHNAME); return 0; }
+-    wcscpy_s(slash + 1, ARRAYSIZE(path) - (slash + 1 - path), L"OpenSteamTool.dll");
+-    NestGStartup::Write("proxy.load.begin");
+-    HMODULE runtime = LoadLibraryExW(path, nullptr,
+-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+-    if (!runtime) { NestGStartup::Write("proxy.load.failed", GetLastError()); return 0; }
+-    auto initialize = reinterpret_cast<void(WINAPI*)()>(GetProcAddress(runtime, "NestGInitialize"));
+-    if (!initialize) { NestGStartup::Write("proxy.export.failed", GetLastError()); return 0; }
+-    NestGStartup::Write("proxy.load.complete");
+-    initialize(); // The runtime serializes initialization across both proxies.
+-    return 0;
+-}
+-
+-inline void Attach(HMODULE module) noexcept {
+-    if (!IsSteamHost()) return;
+-    // No LoadLibrary or waiting under the loader lock. Pin before scheduling so
+-    // a host FreeLibrary cannot unmap the worker's instructions before it runs.
+-    HMODULE pinned = nullptr;
+-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+-            reinterpret_cast<LPCWSTR>(module), &pinned)) return;
+-    HANDLE thread = CreateThread(nullptr, 0, Initialize, module, 0, nullptr);
+-    if (thread) CloseHandle(thread);
+-    else NestGStartup::Write("proxy.worker.failed", GetLastError());
+-    // The optional runtime failing never makes the OS proxy's DllMain fail.
+-}
+-}
++#pragma once
++#include "StartupDiagnostics.h"
++
++namespace NestGProxy {
++inline bool IsSteamHost() noexcept {
++    wchar_t path[32768];
++    const DWORD length = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
++    if (!length || length >= ARRAYSIZE(path)) return false;
++    const wchar_t* name = wcsrchr(path, L'\\');
++    return name && _wcsicmp(name + 1, L"steam.exe") == 0;
++}
++
++inline DWORD WINAPI Initialize(void* module) noexcept {
++    NestGStartup::Write("proxy.worker");
++    wchar_t path[32768];
++    DWORD length = GetModuleFileNameW(static_cast<HMODULE>(module), path, ARRAYSIZE(path));
++    if (!length || length >= ARRAYSIZE(path) - ARRAYSIZE(L"OpenSteamTool.dll")) {
++        NestGStartup::Write("proxy.path.failed", GetLastError()); return 0;
++    }
++    wchar_t* slash = wcsrchr(path, L'\\');
++    if (!slash) { NestGStartup::Write("proxy.path.failed", ERROR_BAD_PATHNAME); return 0; }
++    wcscpy_s(slash + 1, ARRAYSIZE(path) - (slash + 1 - path), L"OpenSteamTool.dll");
++    NestGStartup::Write("proxy.load.begin");
++    HMODULE runtime = LoadLibraryExW(path, nullptr,
++        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
++    if (!runtime) { NestGStartup::Write("proxy.load.failed", GetLastError()); return 0; }
++    auto initialize = reinterpret_cast<void(WINAPI*)()>(GetProcAddress(runtime, "NestGInitialize"));
++    if (!initialize) { NestGStartup::Write("proxy.export.failed", GetLastError()); return 0; }
++    NestGStartup::Write("proxy.load.complete");
++    initialize(); // The runtime serializes initialization across both proxies.
++    return 0;
++}
++
++inline void Attach(HMODULE module) noexcept {
++    if (!IsSteamHost()) return;
++    // No LoadLibrary or waiting under the loader lock. Pin before scheduling so
++    // a host FreeLibrary cannot unmap the worker's instructions before it runs.
++    HMODULE pinned = nullptr;
++    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
++            reinterpret_cast<LPCWSTR>(module), &pinned)) return;
++    HANDLE thread = CreateThread(nullptr, 0, Initialize, module, 0, nullptr);
++    if (thread) CloseHandle(thread);
++    else NestGStartup::Write("proxy.worker.failed", GetLastError());
++    // The optional runtime failing never makes the OS proxy's DllMain fail.
++}
++}
+diff --git a/src/NestG/RentalData.h b/src/NestG/RentalData.h
+new file mode 100644
+index 0000000..f29fadc
+--- /dev/null
++++ b/src/NestG/RentalData.h
+@@ -0,0 +1,137 @@
++#pragma once
++
++// Rental inputs are data. They are never evaluated by the unrestricted retail
++// Lua VM; consequently switching accounts can revoke every rental contribution
++// by dropping one immutable snapshot, without undoing Lua side effects.
++#include <algorithm>
++#include <charconv>
++#include <cctype>
++#include <cstdint>
++#include <limits>
++#include <map>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace NestGRental {
++struct Manifest { uint64_t gid = 0; uint64_t size = 0; };
++struct Data {
++    std::map<uint32_t, std::string> depotKeys;
++    std::map<uint32_t, uint64_t> accessTokens;
++    std::map<uint32_t, uint64_t> statIds;
++    std::map<uint32_t, Manifest> manifests;
++    std::vector<uint32_t> pinned;
++};
++
++inline bool Decimal(std::string_view text, uint64_t& value) {
++    if (text.empty() || text.size() > 20 ||
++        text.find_first_not_of("0123456789") != std::string_view::npos) return false;
++    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
++    return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size();
++}
++
++class DataParser {
++    std::string_view input;
++    size_t pos = 0;
++    bool invalid = false;
++    void Space() {
++        for (;;) {
++            while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos]))) ++pos;
++            if (input.substr(pos, 2) != "--") return;
++            pos += 2;
++            if (input.substr(pos, 2) == "[[") {
++                const auto end = input.find("]]", pos + 2);
++                if (end == std::string_view::npos) { invalid = true; return; }
++                pos = end + 2;
++            } else {
++                const auto end = input.find('\n', pos);
++                pos = end == std::string_view::npos ? input.size() : end + 1;
++            }
++        }
++    }
++    bool Take(char ch) { Space(); if (invalid || pos >= input.size() || input[pos] != ch) return false; ++pos; return true; }
++    bool Literal(std::string& value) {
++        Space(); value.clear(); if (invalid || pos >= input.size()) return false;
++        const char first = input[pos];
++        if (first == '\'' || first == '"') {
++            ++pos;
++            while (pos < input.size()) {
++                const char ch = input[pos++];
++                if (ch == first) return true;
++                if (ch == '\\' || ch == '\r' || ch == '\n' || static_cast<unsigned char>(ch) < 32) return false;
++                value.push_back(ch);
++                if (value.size() > 128) return false;
++            }
++            return false;
++        }
++        while (pos < input.size() && input[pos] >= '0' && input[pos] <= '9') value.push_back(input[pos++]);
++        return !value.empty() && value.size() <= 20;
++    }
++public:
++    explicit DataParser(std::string_view value) : input(value) {}
++    bool Parse(Data& output) {
++        if (input.size() > 1024 * 1024 || input.find('\0') != std::string_view::npos) return false;
++        Data candidate;
++        size_t calls = 0;
++        for (;;) {
++            Space(); if (invalid) return false;
++            if (pos == input.size()) { output = std::move(candidate); return calls > 0; }
++            const auto begin = pos;
++            while (pos < input.size() && std::isalpha(static_cast<unsigned char>(input[pos]))) ++pos;
++            if (begin == pos || pos - begin > 24 || ++calls > 8192) return false;
++            std::string name(input.substr(begin, pos - begin));
++            std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
++            if (!Take('(')) return false;
++            std::vector<std::string> args(1);
++            if (!Literal(args[0])) return false;
++            while (Take(',')) { if (args.size() >= 3) return false; args.emplace_back(); if (!Literal(args.back())) return false; }
++            if (!Take(')')) return false;
++            Take(';');
++            uint64_t first = 0, second = 0;
++            if (!Decimal(args[0], first) || first == 0 || first > UINT32_MAX) return false;
++            const auto id = static_cast<uint32_t>(first);
++            if (name == "addappid") {
++                if (args.size() > 1 && !Decimal(args[1], second)) return false;
++                std::string key;
++                if (args.size() == 3) {
++                    key = args[2];
++                    if (key.size() != 64 || key.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) return false;
++                }
++                auto [it, added] = candidate.depotKeys.emplace(id, key);
++                if (!added && !key.empty()) {
++                    if (!it->second.empty() && it->second != key) return false;
++                    it->second = key;
++                }
++            } else if (name == "addtoken" || name == "setstat" || name == "setmanifestid") {
++                if (args.size() < 2 || args.size() > (name == "setmanifestid" ? 3u : 2u) ||
++                    !Decimal(args[1], second) || second == 0) return false;
++                if (name == "addtoken") candidate.accessTokens[id] = second;
++                else if (name == "setstat") candidate.statIds[id] = second;
++                else {
++                    uint64_t ignored = 0;
++                    if (args.size() == 3 && !Decimal(args[2], ignored)) return false;
++                    candidate.manifests[id] = { second, 0 };
++                }
++            } else if (name == "pinapp" && args.size() == 1) candidate.pinned.push_back(id);
++            else return false; // No arbitrary Lua, HTTP, credential writes or globals.
++        }
++    }
++};
++
++inline bool Merge(Data& target, const Data& source) {
++    for (const auto& [id, key] : source.depotKeys) {
++        auto it = target.depotKeys.find(id);
++        if (it != target.depotKeys.end() && !key.empty() && !it->second.empty() && it->second != key) return false;
++    }
++    for (const auto& [id, manifest] : source.manifests) {
++        auto it = target.manifests.find(id);
++        if (it != target.manifests.end() && it->second.gid != manifest.gid) return false;
++    }
++    for (const auto& [id, key] : source.depotKeys) if (!key.empty() || !target.depotKeys.count(id)) target.depotKeys[id] = key;
++    target.accessTokens.insert(source.accessTokens.begin(), source.accessTokens.end());
++    target.statIds.insert(source.statIds.begin(), source.statIds.end());
++    target.manifests.insert(source.manifests.begin(), source.manifests.end());
++    target.pinned.insert(target.pinned.end(), source.pinned.begin(), source.pinned.end());
++    return true;
++}
++}
+diff --git a/src/NestG/RentalIdentity.cpp b/src/NestG/RentalIdentity.cpp
+new file mode 100644
+index 0000000..702bbe1
+--- /dev/null
++++ b/src/NestG/RentalIdentity.cpp
+@@ -0,0 +1,109 @@
++#include "RentalIdentity.h"
++
++namespace RentalIdentity {
++namespace {
++// As with the existing pinned-runtime watchers, keep synchronization alive
++// through Windows process teardown. No worker or destructor runs in DllMain.
++Tracker& RuntimeTracker() {
++    static auto* tracker = new Tracker;
++    return *tracker;
++}
++}
++
++bool Tracker::IsIndividualSteamId(std::uint64_t steamId) {
++    // Public universe, individual account, desktop instance, nonzero AccountID.
++    return (steamId >> 56) == 1 && ((steamId >> 52) & 0xf) == 1 &&
++           ((steamId >> 32) & 0xfffff) == 1 && (steamId & 0xffffffffu) != 0;
++}
++
++Snapshot Tracker::Capture() const {
++    std::lock_guard lock(mutex_);
++    return snapshot_;
++}
++
++void Tracker::InvalidateLocked(State state) {
++    if (snapshot_.state == State::Authenticated) {
++        if (retiredSessions_.size() >= 32768) ambiguousAttempt_ = true;
++        else retiredSessions_.emplace(snapshot_.steamId, snapshot_.steamSessionId);
++    }
++    ++snapshot_.generation;
++    snapshot_.state = state;
++    snapshot_.steamId = 0;
++    snapshot_.steamSessionId = 0;
++    expectedSteamId_ = 0;
++}
++
++void Tracker::SetObserverAvailability(bool sendInstalled, bool receiveInstalled) {
++    std::lock_guard lock(mutex_);
++    const bool ready = sendInstalled && receiveInstalled;
++    if (snapshot_.observerReady == ready) return;
++    if (!ready && snapshot_.state == State::Pending) ambiguousAttempt_ = true;
++    snapshot_.observerReady = ready;
++    InvalidateLocked(State::Unknown);
++}
++
++void Tracker::BeginLogon(std::uint64_t expectedSteamId) {
++    std::lock_guard lock(mutex_);
++    // The existing hook has no proven per-attempt request correlation. An
++    // overlapping request could receive an old same-account reply; do not
++    // guess a socket layout or treat that reply as a new proof. A fresh Steam
++    // process is required after ambiguity (ordinary terminal Guard failures
++    // leave Unknown and permit a later non-overlapping attempt).
++    if (snapshot_.state == State::Pending) ambiguousAttempt_ = true;
++    InvalidateLocked(snapshot_.observerReady && !ambiguousAttempt_ ? State::Pending : State::Unknown);
++    // Only a correlation hint; never permission to load rental data.
++    if (IsIndividualSteamId(expectedSteamId)) expectedSteamId_ = expectedSteamId;
++}
++
++void Tracker::SignOut() {
++    std::lock_guard lock(mutex_);
++    if (snapshot_.state == State::Pending) ambiguousAttempt_ = true;
++    InvalidateLocked(State::SignedOut);
++}
++
++void Tracker::ObserveLogonResponse(std::int32_t result, bool hasResult,
++                                  std::uint64_t steamId, std::int32_t sessionId) {
++    std::lock_guard lock(mutex_);
++    // Late replies after logout, unsolicited replies and duplicate replies do
++    // not reauthorize an account. Every proof belongs to an observed login.
++    if (!snapshot_.observerReady || ambiguousAttempt_ || snapshot_.state != State::Pending) return;
++    if (!hasResult || result != 1 || !IsIndividualSteamId(steamId) ||
++        sessionId == 0 || retiredSessions_.count({steamId, sessionId}) ||
++        (expectedSteamId_ != 0 && expectedSteamId_ != steamId)) {
++        InvalidateLocked(State::Unknown);
++        return;
++    }
++    ++snapshot_.generation;
++    snapshot_.state = State::Authenticated;
++    snapshot_.steamId = steamId;
++    snapshot_.steamSessionId = sessionId;
++    expectedSteamId_ = 0;
++}
++
++void Tracker::ObserveAuthenticatedHeader(std::uint64_t steamId, std::int32_t sessionId,
++                                        bool hasSteamId, bool hasSessionId) {
++    std::lock_guard lock(mutex_);
++    if (snapshot_.state != State::Authenticated) return;
++    // Generic traffic can invalidate an old proof, but cannot grant a new one.
++    // Some service headers omit identity/session, so absence is not a mismatch.
++    if ((hasSteamId && steamId != 0 && steamId != snapshot_.steamId) ||
++        (hasSessionId && sessionId != 0 && sessionId != snapshot_.steamSessionId)) {
++        InvalidateLocked(State::Unknown);
++    }
++}
++
++Snapshot Capture() { return RuntimeTracker().Capture(); }
++void SetObserverAvailability(bool send, bool receive) {
++    RuntimeTracker().SetObserverAvailability(send, receive);
++}
++void BeginLogon(std::uint64_t steamId) { RuntimeTracker().BeginLogon(steamId); }
++void SignOut() { RuntimeTracker().SignOut(); }
++void ObserveLogonResponse(std::int32_t result, bool hasResult,
++                          std::uint64_t steamId, std::int32_t sessionId) {
++    RuntimeTracker().ObserveLogonResponse(result, hasResult, steamId, sessionId);
++}
++void ObserveAuthenticatedHeader(std::uint64_t steamId, std::int32_t sessionId,
++                                bool hasSteamId, bool hasSessionId) {
++    RuntimeTracker().ObserveAuthenticatedHeader(steamId, sessionId, hasSteamId, hasSessionId);
++}
++} // namespace RentalIdentity
+diff --git a/src/NestG/RentalIdentity.h b/src/NestG/RentalIdentity.h
+new file mode 100644
+index 0000000..55e5eb4
+--- /dev/null
++++ b/src/NestG/RentalIdentity.h
+@@ -0,0 +1,53 @@
++#pragma once
++
++#include <cstdint>
++#include <mutex>
++#include <set>
++#include <utility>
++
++// Identity is observed from the original Steam connection before Better modifies
++// any IPC response. A selected account, VDF entry, registry value, game ticket or
++// outbound logon request is never sufficient to authorize a rental source.
++namespace RentalIdentity {
++
++enum class State { Unknown, Pending, Authenticated, SignedOut };
++
++struct Snapshot {
++    State state = State::Unknown;
++    std::uint64_t steamId = 0;
++    std::uint64_t generation = 0;
++    std::int32_t steamSessionId = 0;
++    bool observerReady = false;
++};
++
++class Tracker {
++public:
++    Snapshot Capture() const;
++    void SetObserverAvailability(bool sendInstalled, bool receiveInstalled);
++    void BeginLogon(std::uint64_t expectedSteamId = 0);
++    void SignOut();
++    void ObserveLogonResponse(std::int32_t result, bool hasResult,
++                              std::uint64_t steamId, std::int32_t sessionId);
++    void ObserveAuthenticatedHeader(std::uint64_t steamId, std::int32_t sessionId,
++                                    bool hasSteamId, bool hasSessionId);
++    static bool IsIndividualSteamId(std::uint64_t steamId);
++
++private:
++    void InvalidateLocked(State state);
++    mutable std::mutex mutex_;
++    Snapshot snapshot_;
++    std::uint64_t expectedSteamId_ = 0;
++    bool ambiguousAttempt_ = false;
++    std::set<std::pair<std::uint64_t, std::int32_t>> retiredSessions_;
++};
++
++Snapshot Capture();
++void SetObserverAvailability(bool sendInstalled, bool receiveInstalled);
++void BeginLogon(std::uint64_t expectedSteamId = 0);
++void SignOut();
++void ObserveLogonResponse(std::int32_t result, bool hasResult,
++                          std::uint64_t steamId, std::int32_t sessionId);
++void ObserveAuthenticatedHeader(std::uint64_t steamId, std::int32_t sessionId,
++                                bool hasSteamId, bool hasSessionId);
++
++} // namespace RentalIdentity
+diff --git a/src/NestG/RentalJson.h b/src/NestG/RentalJson.h
+new file mode 100644
+index 0000000..361aafc
+--- /dev/null
++++ b/src/NestG/RentalJson.h
+@@ -0,0 +1,109 @@
++#pragma once
++#include "RentalData.h"
++#include <map>
++#include <stdexcept>
++
++namespace NestGRental {
++// Small bounded parser for the fixed runtime protocol. Duplicate object fields,
++// floating point numbers and strings with control characters are rejected.
++struct Json {
++    enum class Type { Null, Object, Array, String, Number, Boolean } type = Type::Null;
++    std::string text;
++    std::map<std::string, Json> object;
++    std::vector<Json> array;
++    const Json& At(const std::string& name) const {
++        if (type != Type::Object) throw std::runtime_error("json_type");
++        return object.at(name);
++    }
++    std::string String() const {
++        if (type != Type::String) throw std::runtime_error("json_type"); return text;
++    }
++    uint64_t Number() const {
++        uint64_t value = 0;
++        if (type != Type::Number || !Decimal(text, value)) throw std::runtime_error("json_number");
++        return value;
++    }
++};
++class JsonParser {
++    std::string_view text;
++    size_t pos = 0;
++    size_t nodes = 0;
++    void Space() { while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\r' || text[pos] == '\n' || text[pos] == '\t')) ++pos; }
++    bool Take(char ch) { Space(); if (pos < text.size() && text[pos] == ch) { ++pos; return true; } return false; }
++    [[noreturn]] static void Fail() { throw std::runtime_error("json_invalid"); }
++    std::string String() {
++        if (!Take('"')) Fail();
++        std::string value;
++        while (pos < text.size()) {
++            char ch = text[pos++];
++            if (ch == '"') return value;
++            if (ch == '\\') {
++                if (pos >= text.size()) Fail(); ch = text[pos++];
++                switch (ch) {
++                case '"': case '\\': case '/': break;
++                case 'u': {
++                    if (text.size() - pos < 4 || text.substr(pos, 2) != "00") Fail();
++                    unsigned code = 0;
++                    for (size_t i = 0; i < 4; ++i) {
++                        const char digit = text[pos++]; code <<= 4;
++                        if (digit >= '0' && digit <= '9') code += digit - '0';
++                        else if (digit >= 'a' && digit <= 'f') code += digit - 'a' + 10;
++                        else if (digit >= 'A' && digit <= 'F') code += digit - 'A' + 10;
++                        else Fail();
++                    }
++                    if (code < 32 || code > 127) Fail(); ch = static_cast<char>(code); break;
++                }
++                default: Fail();
++                }
++            }
++            if (static_cast<unsigned char>(ch) < 32 || value.size() >= 4096) Fail();
++            value.push_back(ch);
++        }
++        Fail();
++    }
++    Json Value(size_t depth) {
++        Space(); if (depth > 12 || ++nodes > 40000 || pos >= text.size()) Fail();
++        Json result;
++        if (Take('{')) {
++            result.type = Json::Type::Object;
++            if (Take('}')) return result;
++            do {
++                const auto key = String(); if (!Take(':')) Fail();
++                if (!result.object.emplace(key, Value(depth + 1)).second) Fail();
++                if (Take('}')) return result;
++            } while (Take(','));
++            Fail();
++        }
++        if (Take('[')) {
++            result.type = Json::Type::Array;
++            if (Take(']')) return result;
++            do {
++                result.array.push_back(Value(depth + 1)); if (Take(']')) return result;
++            } while (Take(','));
++            Fail();
++        }
++        if (text[pos] == '"') { result.type = Json::Type::String; result.text = String(); return result; }
++        const auto start = pos;
++        while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') ++pos;
++        if (pos > start) {
++            result.type = Json::Type::Number; result.text = std::string(text.substr(start, pos - start));
++            if (result.text.size() > 1 && result.text[0] == '0') Fail();
++            result.Number(); return result;
++        }
++        for (const auto literal : {std::string_view("true"), std::string_view("false"), std::string_view("null")}) {
++            if (text.substr(pos, literal.size()) == literal) {
++                pos += literal.size(); result.type = literal == "null" ? Json::Type::Null : Json::Type::Boolean;
++                result.text = std::string(literal); return result;
++            }
++        }
++        Fail();
++    }
++public:
++    explicit JsonParser(std::string_view input) : text(input) {}
++    Json Parse() {
++        if (text.size() > 4 * 1024 * 1024) Fail();
++        if (text.substr(0, 3) == "\xEF\xBB\xBF") pos = 3;
++        auto result = Value(0); Space(); if (pos != text.size()) Fail(); return result;
++    }
++};
++}
+diff --git a/src/NestG/RentalRuntime.cpp b/src/NestG/RentalRuntime.cpp
+new file mode 100644
+index 0000000..53b47de
+--- /dev/null
++++ b/src/NestG/RentalRuntime.cpp
+@@ -0,0 +1,811 @@
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include "RentalRuntime.h"
++#include "RentalIdentity.h"
++#include "RentalJson.h"
++#include "StartupDiagnostics.h"
++#include "Hook/Hooks_Package.h"
++#include "Hook/Hooks_Manifest.h"
++#include "OSTPlatform/include/Encoding.h"
++#include "OSTPlatform/include/Detour.h"
++
++#include <windows.h>
++#include <winhttp.h>
++#include <winternl.h>
++#include <wincrypt.h>
++#include <bcrypt.h>
++#include <objbase.h>
++#include <atomic>
++#include <array>
++#include <chrono>
++#include <fstream>
++#include <mutex>
++#include <set>
++#include <thread>
++#include <unordered_map>
++
++namespace NestGRental {
++namespace fs = std::filesystem;
++namespace {
++constexpr char kGrantPurpose[] = "NestG.RentalRuntime.Grant.v1";
++constexpr char kVaultPurpose[] = "NestG.RentalRuntime.Vault.v1";
++constexpr uint64_t kMaximumAllowanceMs = 120000;
++constexpr DWORD kPollMs = 30000;
++struct Handle {
++    HANDLE value = INVALID_HANDLE_VALUE;
++    explicit Handle(HANDLE h = INVALID_HANDLE_VALUE) : value(h) {}
++    ~Handle() { if (value != INVALID_HANDLE_VALUE && value) CloseHandle(value); }
++    Handle(const Handle&) = delete;
++    Handle& operator=(const Handle&) = delete;
++};
++struct Internet {
++    HINTERNET value = nullptr;
++    explicit Internet(HINTERNET h = nullptr) : value(h) {}
++    ~Internet() { if (value) WinHttpCloseHandle(value); }
++};
++struct RuntimeState {
++    fs::path steamRoot;
++    std::mutex changes;
++    std::vector<uint32_t> additions, removals;
++    std::set<uint32_t> everTracked;
++    std::atomic<std::shared_ptr<const Snapshot>> active;
++    std::atomic<bool> started{false};
++    bool readAdapterReady = false;
++    struct InactiveLease {
++        uint64_t steamId = 0, generation = 0;
++        std::string rentalId, steamAccountId, installationId, grantId, revision, status;
++    };
++    std::atomic<std::shared_ptr<const InactiveLease>> inactive;
++    struct ReadHandle { uint64_t steamId, generation, deadline; std::string rentalId, grantId, revision; };
++    std::mutex handlesMutex;
++    std::unordered_map<HANDLE, ReadHandle> readHandles;
++};
++auto& state = *new RuntimeState;
++thread_local unsigned trustedFilesystemDepth = 0;
++thread_local unsigned retailLuaDepth = 0;
++thread_local unsigned adapterDepth = 0;
++struct NativeFilesystemAccess {
++    NativeFilesystemAccess() { ++trustedFilesystemDepth; }
++    ~NativeFilesystemAccess() { --trustedFilesystemDepth; }
++};
++
++std::wstring Lower(std::wstring value) {
++    std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
++    return value;
++}
++bool Guid(const std::string& text) {
++    if (text.size() != 36) return false;
++    for (size_t i = 0; i < text.size(); ++i) {
++        if (i == 8 || i == 13 || i == 18 || i == 23) { if (text[i] != '-') return false; }
++        else if (!std::isxdigit(static_cast<unsigned char>(text[i]))) return false;
++    }
++    return true;
++}
++bool Under(const fs::path& path, const fs::path& root) {
++    const auto child = Lower(path.lexically_normal().wstring());
++    auto parent = Lower(root.lexically_normal().wstring());
++    while (!parent.empty() && (parent.back() == L'\\' || parent.back() == L'/')) parent.pop_back();
++    return child.size() > parent.size() && child.compare(0, parent.size(), parent) == 0 &&
++        (child[parent.size()] == L'\\' || child[parent.size()] == L'/');
++}
++bool SafePath(const fs::path& path) {
++    if (state.steamRoot.empty() || !Under(path, state.steamRoot)) return false;
++    const auto relative = path.lexically_relative(state.steamRoot);
++    fs::path probe = state.steamRoot;
++    for (const auto& component : relative) {
++        const auto name = component.wstring();
++        if (name.empty() || name == L"." || name == L".." || name.find_first_of(L":/\\") != std::wstring::npos) return false;
++        probe /= component;
++        const DWORD attrs = GetFileAttributesW(probe.c_str());
++        if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
++    }
++    return true;
++}
++struct WriterLock : Handle {
++    explicit WriterLock(bool allowCreate = true) : Handle() {
++        NativeFilesystemAccess trusted;
++        const auto root = state.steamRoot / L"nestg-rentals";
++        if (!SafePath(root)) throw std::runtime_error("rental_lock_path");
++        const auto path = root / L".writer.lock";
++        value = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, allowCreate ? OPEN_ALWAYS : OPEN_EXISTING,
++            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
++        BY_HANDLE_FILE_INFORMATION info{};
++        if (value == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(value, &info) || info.nNumberOfLinks != 1 ||
++            (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))) throw std::runtime_error("rental_busy");
++    }
++};
++std::string Read(const fs::path& path, size_t limit) {
++    NativeFilesystemAccess trusted;
++    if (!SafePath(path)) throw std::runtime_error("rental_path");
++    Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
++        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
++    BY_HANDLE_FILE_INFORMATION info{};
++    if (file.value == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(file.value, &info) ||
++        info.nNumberOfLinks != 1 || (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) ||
++        info.nFileSizeHigh || info.nFileSizeLow > limit) throw std::runtime_error("rental_file");
++    std::string bytes(info.nFileSizeLow, '\0');
++    DWORD read = 0;
++    if (!bytes.empty() && (!ReadFile(file.value, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr) || read != bytes.size()))
++        throw std::runtime_error("rental_read");
++    return bytes;
++}
++std::string Sha(const std::string& bytes) {
++    BCRYPT_ALG_HANDLE algorithm = nullptr;
++    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) throw std::runtime_error("rental_hash");
++    std::array<unsigned char, 32> digest{};
++    const auto result = BCryptHash(algorithm, nullptr, 0,
++        reinterpret_cast<PUCHAR>(const_cast<char*>(bytes.data())), static_cast<ULONG>(bytes.size()), digest.data(), static_cast<ULONG>(digest.size()));
++    BCryptCloseAlgorithmProvider(algorithm, 0);
++    if (result < 0) throw std::runtime_error("rental_hash");
++    constexpr char hex[] = "0123456789abcdef";
++    std::string output;
++    for (const auto byte : digest) { output.push_back(hex[byte >> 4]); output.push_back(hex[byte & 15]); }
++    return output;
++}
++void WriteAtomic(const fs::path& path, const std::string& bytes) {
++    NativeFilesystemAccess trusted;
++    if (!SafePath(path.parent_path())) throw std::runtime_error("rental_write_path");
++    const auto attrs = GetFileAttributesW(path.c_str());
++    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)))
++        throw std::runtime_error("rental_write_path");
++    // Keep temporary names independent of the payload filename; appending to a
++    // long manifest name can exceed MAX_PATH even when the final path is valid.
++    const auto temporary = path.parent_path() / (L".n-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L".tmp");
++    Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
++        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
++    if (file.value == INVALID_HANDLE_VALUE) throw std::runtime_error("rental_write");
++    DWORD wrote = 0;
++    if (!WriteFile(file.value, bytes.data(), static_cast<DWORD>(bytes.size()), &wrote, nullptr) || wrote != bytes.size() || !FlushFileBuffers(file.value)) {
++        CloseHandle(file.value); file.value = INVALID_HANDLE_VALUE; DeleteFileW(temporary.c_str());
++        throw std::runtime_error("rental_write");
++    }
++    CloseHandle(file.value); file.value = INVALID_HANDLE_VALUE;
++    if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
++        DeleteFileW(temporary.c_str()); throw std::runtime_error("rental_commit");
++    }
++}
++std::string Protect(const std::string& input, const char* purpose, bool encrypt) {
++    DATA_BLOB source{static_cast<DWORD>(input.size()), reinterpret_cast<BYTE*>(const_cast<char*>(input.data()))};
++    DATA_BLOB entropy{static_cast<DWORD>(strlen(purpose)), reinterpret_cast<BYTE*>(const_cast<char*>(purpose))}, result{};
++    const bool ok = encrypt ? CryptProtectData(&source, L"NestG rental data", &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &result) :
++        CryptUnprotectData(&source, nullptr, &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &result);
++    if (!ok) throw std::runtime_error("rental_protection");
++    std::string bytes(reinterpret_cast<char*>(result.pbData), result.cbData);
++    SecureZeroMemory(result.pbData, result.cbData); LocalFree(result.pbData);
++    return bytes;
++}
++uint64_t Time(const std::string& value) {
++    if (value.size() < 20 || value[4] != '-' || value[7] != '-' || value[10] != 'T' || value[13] != ':' || value[16] != ':')
++        throw std::runtime_error("rental_time");
++    auto part = [&](size_t start, size_t count) {
++        uint64_t number = 0; if (!Decimal(std::string_view(value).substr(start, count), number)) throw std::runtime_error("rental_time");
++        return static_cast<WORD>(number);
++    };
++    SYSTEMTIME time{};
++    time.wYear = part(0, 4); time.wMonth = part(5, 2); time.wDay = part(8, 2);
++    time.wHour = part(11, 2); time.wMinute = part(14, 2); time.wSecond = part(17, 2);
++    size_t suffix = 19;
++    if (suffix < value.size() && value[suffix] == '.') {
++        const auto start = ++suffix;
++        while (suffix < value.size() && value[suffix] >= '0' && value[suffix] <= '9') ++suffix;
++        if (suffix == start || suffix - start > 7) throw std::runtime_error("rental_time");
++        std::string millis(value.substr(start, std::min<size_t>(3, suffix - start)));
++        while (millis.size() < 3) millis.push_back('0');
++        uint64_t parsed = 0; Decimal(millis, parsed); time.wMilliseconds = static_cast<WORD>(parsed);
++    }
++    if (value.substr(suffix) != "Z" && value.substr(suffix) != "+00:00") throw std::runtime_error("rental_time");
++    FILETIME ft{}; if (!SystemTimeToFileTime(&time, &ft)) throw std::runtime_error("rental_time");
++    return (static_cast<uint64_t>(ft.dwHighDateTime) << 32 | ft.dwLowDateTime) / 10000;
++}
++std::string RequestId() {
++    GUID id{}; wchar_t text[40]{};
++    if (CoCreateGuid(&id) != S_OK || !StringFromGUID2(id, text, 40)) throw std::runtime_error("rental_request");
++    std::string value; for (size_t i = 1; i < 37; ++i) value.push_back(static_cast<char>(towlower(text[i]))); return value;
++}
++struct Control {
++    fs::path root;
++    std::string origin, installationId, steamId, rentalId, grant, grantId, steamAccountId, revision;
++    ~Control() { if (!grant.empty()) SecureZeroMemory(grant.data(), grant.size()); }
++};
++Control LoadControl(const fs::path& root) {
++    const auto json = JsonParser(Read(root / L".nestg" / L"runtime.json", 16384)).Parse();
++    Control control;
++    control.root = root; control.origin = json.At("apiOrigin").String(); control.installationId = json.At("installationId").String();
++    control.steamId = json.At("steamId64").String(); control.rentalId = json.At("rentalId").String();
++    control.grantId = json.At("grantId").String(); control.steamAccountId = json.At("steamAccountId").String(); control.revision = json.At("revision").String();
++    if (json.At("protocolVersion").Number() != 1 || !Guid(control.installationId) || !Guid(control.rentalId) ||
++        !Guid(control.grantId) || !Guid(control.steamAccountId) || control.revision.size() != 64 ||
++        control.revision.find_first_not_of("0123456789abcdef") != std::string::npos ||
++        root.filename() != fs::u8path(control.rentalId) || root.parent_path().filename() != fs::u8path(control.steamId) ||
++        json.At("grantFile").String() != "grant.dat" || json.At("inventoryFile").String() != "inventory.json") throw std::runtime_error("rental_control");
++    control.grant = Protect(Read(root / L".nestg" / L"grant.dat", 16384), kGrantPurpose, false);
++    if (control.grant.size() != 43 || control.grant.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != std::string::npos)
++        throw std::runtime_error("rental_grant");
++    return control;
++}
++Json Check(const Control& control, const std::string& requestId, uint64_t steamId) {
++    const auto url = OSTPlatform::Encoding::Utf8ToWide(control.origin);
++    URL_COMPONENTS components{}; components.dwStructSize = sizeof(components);
++    components.dwHostNameLength = components.dwUrlPathLength = components.dwUserNameLength = components.dwPasswordLength = components.dwExtraInfoLength = static_cast<DWORD>(-1);
++    if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &components) || components.nScheme != INTERNET_SCHEME_HTTPS ||
++        components.dwUserNameLength || components.dwPasswordLength || components.dwExtraInfoLength ||
++        (components.dwUrlPathLength && std::wstring(components.lpszUrlPath, components.dwUrlPathLength) != L"/")) throw std::runtime_error("rental_origin");
++    Internet session(WinHttpOpen(L"NestG-RentalRuntime/1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
++    if (!session.value || !WinHttpSetTimeouts(session.value, 3000, 3000, 3000, 5000)) throw std::runtime_error("rental_http");
++    const std::wstring host(components.lpszHostName, components.dwHostNameLength);
++    const auto normalizedHost = Lower(host);
++    if (!((normalizedHost == L"nestg.cloud" && components.nPort == INTERNET_DEFAULT_HTTPS_PORT) ||
++        normalizedHost == L"localhost" || normalizedHost == L"127.0.0.1" || normalizedHost == L"[::1]" || normalizedHost == L"::1"))
++        throw std::runtime_error("rental_origin");
++    const auto totalDeadline = GetTickCount64() + 15000;
++    Internet connection(WinHttpConnect(session.value, host.c_str(), components.nPort, 0));
++    Internet request(connection.value ? WinHttpOpenRequest(connection.value, L"POST", L"/api/desktop/account-rentals/runtime/check",
++        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr);
++    DWORD disabled = WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_AUTHENTICATION;
++    if (!request.value || !WinHttpSetOption(request.value, WINHTTP_OPTION_DISABLE_FEATURE, &disabled, sizeof(disabled))) throw std::runtime_error("rental_http");
++    const std::string body = "{\"requestId\":\"" + requestId + "\",\"steamId64\":\"" + std::to_string(steamId) +
++        "\",\"installationId\":\"" + control.installationId + "\",\"protocolVersion\":1}";
++    std::wstring headers = L"Content-Type: application/json\r\nAccept: application/json\r\nAuthorization: Bearer ";
++    headers.append(control.grant.begin(), control.grant.end()); headers += L"\r\n";
++    const bool sent = WinHttpSendRequest(request.value, headers.c_str(), static_cast<DWORD>(headers.size()),
++        const_cast<char*>(body.data()), static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0);
++    SecureZeroMemory(headers.data(), headers.size() * sizeof(wchar_t));
++    DWORD status = 0, length = sizeof(status);
++    if (!sent || !WinHttpReceiveResponse(request.value, nullptr) ||
++        !WinHttpQueryHeaders(request.value, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, nullptr, &status, &length, nullptr) || status != 200)
++        throw std::runtime_error("rental_http");
++    std::string response;
++    for (;;) {
++        if (GetTickCount64() >= totalDeadline) throw std::runtime_error("rental_http_deadline");
++        DWORD available = 0;
++        if (!WinHttpQueryDataAvailable(request.value, &available)) throw std::runtime_error("rental_http");
++        if (!available) break;
++        if (response.size() + available > 65536) throw std::runtime_error("rental_http_size");
++        const auto size = response.size(); response.resize(size + available); DWORD received = 0;
++        if (!WinHttpReadData(request.value, response.data() + size, available, &received) || !received) throw std::runtime_error("rental_http");
++        response.resize(size + received);
++    }
++    if (GetTickCount64() >= totalDeadline) throw std::runtime_error("rental_http_deadline");
++    return JsonParser(response).Parse();
++}
++struct InventoryFile { std::string relative, sha; uint32_t app; uint64_t size; };
++std::vector<InventoryFile> Inventory(const Control& control) {
++    const auto json = JsonParser(Read(control.root / L".nestg" / L"inventory.json", 4 * 1024 * 1024)).Parse();
++    if (json.At("protocolVersion").Number() != 1 || json.At("steamId64").String() != control.steamId ||
++        json.At("rentalId").String() != control.rentalId || json.At("revision").String() != control.revision)
++        throw std::runtime_error("rental_inventory");
++    const auto& files = json.At("files");
++    if (files.type != Json::Type::Array || files.array.size() > 4000) throw std::runtime_error("rental_inventory");
++    std::vector<InventoryFile> result;
++    std::set<std::string> seen;
++    uint64_t total = 0;
++    for (const auto& file : files.array) {
++        InventoryFile item{file.At("relativePath").String(), file.At("sha256").String(), static_cast<uint32_t>(file.At("steamAppId").Number()), file.At("sizeBytes").Number()};
++        if (item.app == 0 || file.At("steamAppId").Number() > UINT32_MAX || item.sha.size() != 64 || item.sha.find_first_not_of("0123456789abcdef") != std::string::npos ||
++            item.relative.find_first_of("\\:") != std::string::npos || item.relative.find("..") != std::string::npos || item.relative.find('\0') != std::string::npos ||
++            item.relative.size() > 160 || item.size > 64 * 1024 * 1024 || !seen.insert(item.relative).second || (total += item.size) > 512 * 1024 * 1024)
++            throw std::runtime_error("rental_inventory");
++        const fs::path relative = fs::u8path(item.relative);
++        const auto kind = relative.extension() == L".lua" ? fs::path(L"lua") : fs::path(L"manifests");
++        const auto scopedParent = kind / std::to_wstring(item.app);
++        if (relative.is_absolute() || (relative.parent_path() != kind && relative.parent_path() != scopedParent) ||
++            (relative.extension() != L".lua" && relative.extension() != L".manifest")) throw std::runtime_error("rental_inventory");
++        result.push_back(std::move(item));
++    }
++    return result;
++}
++std::string Verified(const Control& control, const InventoryFile& item) {
++    auto bytes = Read(control.root / fs::u8path(item.relative), static_cast<size_t>(item.size));
++    if (bytes.size() != item.size || Sha(bytes) != item.sha) throw std::runtime_error("rental_integrity");
++    return bytes;
++}
++void Publish(std::shared_ptr<const Snapshot> next) {
++    {
++        std::lock_guard lock(state.changes);
++        auto old = state.active.exchange(next);
++        if (!old && !next) return;
++        if (old) for (const auto& [id, key] : old->data.depotKeys) if (!next || !next->data.depotKeys.count(id)) state.removals.push_back(id);
++        if (next) for (const auto& [id, key] : next->data.depotKeys) {
++            state.everTracked.insert(id);
++            if (!old || !old->data.depotKeys.count(id)) state.additions.push_back(id);
++        }
++    }
++    Hooks_Package::RequestRentalRefresh();
++}
++void RevokeLease(const Control& control) {
++    bool changed = false;
++    {
++        std::lock_guard lock(state.changes);
++        const auto active = state.active.load();
++        if (active && active->rentalId == control.rentalId && active->grantId == control.grantId && active->revision == control.revision) {
++            state.active.store(std::shared_ptr<const Snapshot>{});
++            for (const auto& [id, key] : active->data.depotKeys) state.removals.push_back(id);
++            changed = true;
++        }
++    }
++    if (changed) Hooks_Package::RequestRentalRefresh();
++}
++void Vault(const Control& control) {
++    NativeFilesystemAccess trusted;
++    WriterLock lease;
++    const auto latest = LoadControl(control.root);
++    if (latest.revision != control.revision || latest.grantId != control.grantId) throw std::runtime_error("rental_revision_changed");
++    // Each file is committed independently. On a crash, an already verified
++    // encrypted copy remains; the source is removed only after a round-trip
++    // integrity check. The inventory is retained as the recovery authority.
++    for (const auto& item : Inventory(control)) {
++        const auto source = control.root / fs::u8path(item.relative);
++        if (!SafePath(source)) continue;
++        auto plain = Verified(control, item);
++        const auto encrypted = Protect(plain, kVaultPurpose, true);
++        const auto destination = control.root / L".nestg" / L"vault" / fs::u8path(item.relative + ".dpapi");
++        std::error_code error;
++        auto directory = control.root;
++        for (const auto& component : destination.parent_path().lexically_relative(control.root)) {
++            if (!SafePath(directory)) throw std::runtime_error("rental_vault_path");
++            directory /= component;
++            if (!CreateDirectoryW(directory.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) throw std::runtime_error("rental_vault_path");
++            if (!SafePath(directory)) throw std::runtime_error("rental_vault_path");
++        }
++        WriteAtomic(destination, encrypted);
++        auto verified = Protect(Read(destination, static_cast<size_t>(item.size + 16384)), kVaultPurpose, false);
++        const bool valid = Sha(verified) == item.sha;
++        SecureZeroMemory(verified.data(), verified.size()); SecureZeroMemory(plain.data(), plain.size());
++        if (!valid || !SafePath(source) || Sha(Read(source, static_cast<size_t>(item.size))) != item.sha || !DeleteFileW(source.c_str()))
++            throw std::runtime_error("rental_vault_commit");
++    }
++    NestGStartup::Write("rental.vault.complete");
++}
++std::shared_ptr<const Snapshot> Authorize(const Control& control, const Json& reply, const RentalIdentity::Snapshot& identity, uint64_t started) {
++    WriterLock lease;
++    const auto latest = LoadControl(control.root);
++    if (latest.revision != control.revision || latest.grantId != control.grantId) throw std::runtime_error("rental_revision_changed");
++    if (reply.At("protocolVersion").Number() != 1 || reply.At("steamId64").String() != control.steamId ||
++        reply.At("rentalId").String() != control.rentalId || reply.At("installationId").String() != control.installationId ||
++        reply.At("grantId").String() != control.grantId || reply.At("steamAccountId").String() != control.steamAccountId || reply.At("revision").String() != control.revision)
++        throw std::runtime_error("rental_response_scope");
++    const auto now = Time(reply.At("serverNowUtc").String());
++    const auto end = Time(reply.At("endsAtUtc").String());
++    const auto allowance = Time(reply.At("authorizationExpiresAtUtc").String());
++    const auto deadline = std::min(end, allowance);
++    if (deadline <= now || deadline - now > kMaximumAllowanceMs || GetTickCount64() - started >= deadline - now) throw std::runtime_error("rental_allowance");
++    const auto& allowed = reply.At("allowedAppIds");
++    if (allowed.type != Json::Type::Array || allowed.array.size() > 2048) throw std::runtime_error("rental_apps");
++    std::set<uint32_t> appIds;
++    for (const auto& value : allowed.array) { const auto app = value.Number(); if (!app || app > UINT32_MAX) throw std::runtime_error("rental_apps"); appIds.insert(static_cast<uint32_t>(app)); }
++    auto snapshot = std::make_shared<Snapshot>();
++    snapshot->steamId = identity.steamId; snapshot->generation = identity.generation;
++    snapshot->deadlineTicks = started + deadline - now; snapshot->rentalId = control.rentalId; snapshot->root = control.root;
++    snapshot->grantId = control.grantId; snapshot->revision = control.revision;
++    snapshot->steamAccountId = control.steamAccountId; snapshot->installationId = control.installationId;
++    for (const auto& item : Inventory(control)) {
++        if (!appIds.count(item.app)) continue;
++        const auto relative = fs::u8path(item.relative);
++        auto bytes = Verified(control, item);
++        if (relative.extension() == L".lua") {
++            Data data;
++            if (item.size > 1024 * 1024 || !DataParser(bytes).Parse(data) || !data.depotKeys.count(item.app) || !Merge(snapshot->data, data))
++                throw std::runtime_error("rental_data");
++            if (snapshot->data.depotKeys.size() > 65536 || snapshot->data.accessTokens.size() > 16384 ||
++                snapshot->data.statIds.size() > 4096 || snapshot->data.manifests.size() > 65536 || snapshot->data.pinned.size() > 65536)
++                throw std::runtime_error("rental_data_limit");
++        } else {
++            const auto file = relative.filename().wstring();
++            const auto separator = file.find(L'_'), dot = file.find(L'.');
++            if (separator == std::wstring::npos || dot == std::wstring::npos || separator >= dot) throw std::runtime_error("rental_manifest");
++            uint64_t depot = 0, gid = 0;
++            const std::string narrow = OSTPlatform::Encoding::WideToUtf8(file);
++            if (!Decimal(std::string_view(narrow).substr(0, separator), depot) || !depot || depot > UINT32_MAX ||
++                !Decimal(std::string_view(narrow).substr(separator + 1, dot - separator - 1), gid) || !gid) throw std::runtime_error("rental_manifest");
++            const auto key = std::to_wstring(item.app) + L"/" + Lower(file);
++            snapshot->manifestFiles[key] = {control.root / relative, item.size, item.sha};
++        }
++        SecureZeroMemory(bytes.data(), bytes.size());
++    }
++    const auto current = RentalIdentity::Capture();
++    if (current.state != RentalIdentity::State::Authenticated || current.generation != identity.generation || current.steamId != identity.steamId)
++        throw std::runtime_error("rental_account_changed");
++    return snapshot;
++}
++std::vector<fs::path> DiscoverCandidates(const fs::path& accountRoot, const std::shared_ptr<const Snapshot>& prior) {
++    struct Candidate { fs::path path; fs::file_time_type modified; bool current; };
++    std::vector<Candidate> candidates;
++    const auto less = [](const Candidate& left, const Candidate& right) {
++        return left.current != right.current ? !left.current : left.modified < right.modified;
++    };
++    if (prior && SafePath(prior->root)) candidates.push_back({prior->root, fs::file_time_type::max(), true});
++    std::error_code error;
++    for (const auto& entry : fs::directory_iterator(accountRoot, error)) {
++        if (error) break;
++        if (!Guid(entry.path().filename().string()) || !entry.is_directory(error) || !SafePath(entry.path()) ||
++            (prior && entry.path() == prior->root)) continue;
++        std::error_code timestampError;
++        const auto modified = fs::last_write_time(entry.path() / L".nestg" / L"runtime.json", timestampError);
++        if (timestampError) continue;
++        Candidate candidate{entry.path(), modified, false};
++        if (candidates.size() < 128) candidates.push_back(std::move(candidate));
++        else {
++            const auto oldest = std::min_element(candidates.begin(), candidates.end(), less);
++            if (less(*oldest, candidate)) *oldest = std::move(candidate);
++        }
++    }
++    std::sort(candidates.begin(), candidates.end(), [&](const auto& left, const auto& right) { return less(right, left); });
++    std::vector<fs::path> result;
++    for (const auto& candidate : candidates) result.push_back(candidate.path);
++    return result;
++}
++void Run() {
++    uint64_t generation = UINT64_MAX, nextCheck = 0;
++    size_t candidateCursor = 0;
++    for (;;) {
++        try {
++            const auto identity = RentalIdentity::Capture();
++            if (identity.generation != generation) { Publish(nullptr); generation = identity.generation; nextCheck = 0; candidateCursor = 0; }
++            auto active = state.active.load();
++            if (active && (!identity.observerReady || identity.state != RentalIdentity::State::Authenticated || GetTickCount64() >= active->deadlineTicks)) Publish(nullptr);
++            if (state.readAdapterReady && Hooks_Manifest::RentalReadReady() && Hooks_Package::RentalIsolationReady() && identity.observerReady &&
++                identity.state == RentalIdentity::State::Authenticated && GetTickCount64() >= nextCheck) {
++                nextCheck = GetTickCount64() + kPollMs;
++                const auto accountRoot = state.steamRoot / L"nestg-rentals" / std::to_wstring(identity.steamId);
++                if (SafePath(accountRoot)) {
++                    const auto prior = Acquire();
++                    auto candidates = DiscoverCandidates(accountRoot, prior);
++                    const size_t offset = prior && !candidates.empty() && candidates.front() == prior->root ? 1 : 0;
++                    const auto remaining = candidates.size() - offset;
++                    if (remaining) std::rotate(candidates.begin() + offset, candidates.begin() + offset + candidateCursor % remaining, candidates.end());
++                    size_t checked = 0;
++                    bool authorized = false;
++                    for (const auto& entry : candidates) {
++                        if (++checked > 4 || (authorized && checked > 2)) break;
++                        if (!prior || entry != prior->root) ++candidateCursor;
++                        try {
++                            auto control = [&]() { WriterLock lease; return LoadControl(entry); }();
++                            const auto request = RequestId(); const auto begin = GetTickCount64();
++                            const auto reply = Check(control, request, identity.steamId);
++                            if (reply.At("requestId").String() != request || reply.At("steamId64").String() != control.steamId ||
++                                reply.At("rentalId").String() != control.rentalId || reply.At("installationId").String() != control.installationId || reply.At("protocolVersion").Number() != 1 ||
++                                reply.At("grantId").String() != control.grantId || reply.At("steamAccountId").String() != control.steamAccountId)
++                                throw std::runtime_error("rental_response_scope");
++                            const auto current = RentalIdentity::Capture();
++                            if (current.generation != identity.generation || current.steamId != identity.steamId || current.state != RentalIdentity::State::Authenticated) break;
++                            const auto status = reply.At("status").String();
++                            if (status == "active") {
++                                if (reply.At("revision").String() != control.revision) {
++                                    RevokeLease(control); NestGStartup::Write("rental.prepare.required"); continue;
++                                }
++                                if (!authorized) { Publish(Authorize(control, reply, identity, begin)); authorized = true; NestGStartup::Write("rental.authorized"); }
++                            }
++                            else if (status == "expired" || status == "revoked" || status == "not_started" || status == "released" || status == "no_active_rental" || status == "unmanaged") {
++                                auto inactive = std::make_shared<RuntimeState::InactiveLease>();
++                                inactive->steamId = identity.steamId; inactive->generation = identity.generation;
++                                inactive->rentalId = control.rentalId; inactive->steamAccountId = control.steamAccountId;
++                                inactive->installationId = control.installationId; inactive->grantId = control.grantId;
++                                inactive->revision = control.revision; inactive->status = status == "expired" ? "expired" : "revoked";
++                                state.inactive.store(inactive);
++                                RevokeLease(control); if (status == "expired") Vault(control);
++                            }
++                            else throw std::runtime_error("rental_status");
++                        } catch (...) { NestGStartup::Write("rental.check.unavailable"); }
++                    }
++                }
++            }
++        } catch (...) { NestGStartup::Write("rental.check.unavailable"); }
++        Sleep(250);
++    }
++}
++void Guard() {
++    // Keep revocation independent from DNS/network timeouts and from the number
++    // of registered leases. Getters also validate on every individual read.
++    for (;;) {
++        const auto identity = RentalIdentity::Capture();
++        const auto snapshot = state.active.load();
++        if (snapshot && (!identity.observerReady || identity.state != RentalIdentity::State::Authenticated ||
++            identity.generation != snapshot->generation || identity.steamId != snapshot->steamId || GetTickCount64() >= snapshot->deadlineTicks ||
++            !SafePath(snapshot->root / L".nestg" / L"grant.dat"))) {
++            auto expected = snapshot;
++            {
++                std::lock_guard lock(state.changes);
++                if (state.active.compare_exchange_strong(expected, std::shared_ptr<const Snapshot>{}))
++                    for (const auto& [id, key] : snapshot->data.depotKeys) state.removals.push_back(id);
++            }
++            if (expected == snapshot) Hooks_Package::RequestRentalRefresh();
++        }
++        Sleep(100);
++    }
++}
++
++// A fiber-local exact pathname mapping exists only around the original Steam
++// manifest load. Ordinary retail filesystem calls do not enter this adapter.
++struct ReadScope {
++    std::shared_ptr<const Snapshot> snapshot;
++    std::wstring expected;
++    Snapshot::ManifestFile target;
++};
++DWORD scopeSlot = FLS_OUT_OF_INDEXES;
++using NtCreateFileFunction = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, PLARGE_INTEGER,
++    ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
++NtCreateFileFunction realNtCreateFile = nullptr;
++using NtReadFileFunction = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG, PLARGE_INTEGER, PULONG);
++using NtCloseFunction = NTSTATUS(NTAPI*)(HANDLE);
++using NtCreateSectionFunction = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PLARGE_INTEGER, ULONG, ULONG, HANDLE);
++using NtDuplicateObjectFunction = NTSTATUS(NTAPI*)(HANDLE, HANDLE, HANDLE, PHANDLE, ACCESS_MASK, ULONG, ULONG);
++NtReadFileFunction realNtReadFile = nullptr;
++NtCloseFunction realNtClose = nullptr;
++NtCreateSectionFunction realNtCreateSection = nullptr;
++NtDuplicateObjectFunction realNtDuplicateObject = nullptr;
++NTSTATUS NTAPI ReadHandleAdapter(HANDLE handle, HANDLE event, PIO_APC_ROUTINE routine, PVOID context, PIO_STATUS_BLOCK io,
++    PVOID buffer, ULONG length, PLARGE_INTEGER offset, PULONG key) {
++    bool denied = false;
++    {
++        std::lock_guard lock(state.handlesMutex);
++        const auto found = state.readHandles.find(handle);
++        if (found != state.readHandles.end()) {
++            const auto current = Acquire();
++            denied = !current || current->steamId != found->second.steamId || current->generation != found->second.generation ||
++                current->rentalId != found->second.rentalId || current->grantId != found->second.grantId || current->revision != found->second.revision;
++        }
++    }
++    if (denied) {
++        if (io) { io->Status = static_cast<NTSTATUS>(0xC0000022L); io->Information = 0; }
++        return static_cast<NTSTATUS>(0xC0000022L);
++    }
++    return realNtReadFile(handle, event, routine, context, io, buffer, length, offset, key);
++}
++NTSTATUS NTAPI CloseHandleAdapter(HANDLE handle) {
++    // Erase before the OS can recycle the numeric HANDLE for another open.
++    { std::lock_guard lock(state.handlesMutex); state.readHandles.erase(handle); }
++    return realNtClose(handle);
++}
++NTSTATUS NTAPI SectionAdapter(PHANDLE section, ACCESS_MASK access, POBJECT_ATTRIBUTES attributes, PLARGE_INTEGER size,
++    ULONG protection, ULONG allocation, HANDLE file) {
++    {
++        std::lock_guard lock(state.handlesMutex);
++        // A mapped view could outlive account revocation without another read
++        // syscall. Until a revocable mapped-view reader is implemented, rental
++        // manifest mapping fails closed. Ordinary Steam/retail mappings pass.
++        if (state.readHandles.count(file)) return static_cast<NTSTATUS>(0xC0000022L);
++    }
++    return realNtCreateSection(section, access, attributes, size, protection, allocation, file);
++}
++NTSTATUS NTAPI DuplicateAdapter(HANDLE sourceProcess, HANDLE source, HANDLE targetProcess, PHANDLE target,
++    ACCESS_MASK access, ULONG attributes, ULONG options) {
++    RuntimeState::ReadHandle tag{};
++    bool tagged = false;
++    {
++        std::lock_guard lock(state.handlesMutex);
++        const auto found = state.readHandles.find(source);
++        if (found != state.readHandles.end()) {
++            const auto sourcePid = sourceProcess == GetCurrentProcess() ? GetCurrentProcessId() : GetProcessId(sourceProcess);
++            // An unqueryable source process cannot be used to bypass a tag.
++            if (!sourcePid) return static_cast<NTSTATUS>(0xC0000022L);
++            if (sourcePid == GetCurrentProcessId()) { tagged = true; tag = found->second; }
++        }
++    }
++    if (!tagged) return realNtDuplicateObject(sourceProcess, source, targetProcess, target, access, attributes, options);
++    const auto targetPid = targetProcess == GetCurrentProcess() ? GetCurrentProcessId() : GetProcessId(targetProcess);
++    if (targetPid != GetCurrentProcessId()) return static_cast<NTSTATUS>(0xC0000022L);
++    if (options & 1 /* DUPLICATE_CLOSE_SOURCE */) { std::lock_guard lock(state.handlesMutex); state.readHandles.erase(source); }
++    const auto result = realNtDuplicateObject(sourceProcess, source, targetProcess, target, access, attributes, options);
++    if (result >= 0 && target && *target) { std::lock_guard lock(state.handlesMutex); state.readHandles[*target] = std::move(tag); }
++    return result;
++}
++std::wstring ObjectName(const OBJECT_ATTRIBUTES* attributes) {
++    if (!attributes || !attributes->ObjectName || !attributes->ObjectName->Buffer ||
++        attributes->ObjectName->Length % sizeof(wchar_t) || attributes->ObjectName->Length > 32766) return {};
++    std::wstring path(attributes->ObjectName->Buffer, attributes->ObjectName->Length / sizeof(wchar_t));
++    if (attributes->RootDirectory && !path.empty() && path[0] != L'\\') {
++        // This hook also runs on SteamUI workers/fibers with small stacks.
++        // Keep the bounded path buffer on the heap; allocation failure reaches
++        // ReadAdapter's fail-closed exception boundary.
++        std::vector<wchar_t> root(32768);
++        const auto length = GetFinalPathNameByHandleW(attributes->RootDirectory, root.data(), static_cast<DWORD>(root.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
++        if (!length || length >= root.size()) return {};
++        path = std::wstring(root.data(), length) + L"\\" + path;
++    }
++    if (path.starts_with(L"\\??\\") || path.starts_with(L"\\\\?\\")) path.erase(0, 4);
++    return Lower(fs::path(path).lexically_normal().wstring());
++}
++NTSTATUS NTAPI ReadAdapter(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attributes, PIO_STATUS_BLOCK io,
++    PLARGE_INTEGER allocation, ULONG fileAttributes, ULONG share, ULONG disposition, ULONG options, PVOID ea, ULONG eaLength) {
++    if (adapterDepth) return realNtCreateFile(handle, access, attributes, io, allocation, fileAttributes, share, disposition, options, ea, eaLength);
++    struct Depth { Depth() { ++adapterDepth; } ~Depth() { --adapterDepth; } } depth;
++    try {
++    auto name = ObjectName(attributes);
++    // A retail dofile/loadfile/IO call must not bypass the parser exclusion.
++    // Only this module's bounded inventory/DPAPI helpers and the scoped mapping
++    // can open a file from a rental source inside Steam.
++    if (!trustedFilesystemDepth && !name.empty() &&
++        (retailLuaDepth || name.find(L"nestg-rentals") != std::wstring::npos) && IsReservedPath(fs::path(name))) return static_cast<NTSTATUS>(0xC0000022L);
++    auto* scope = scopeSlot == FLS_OUT_OF_INDEXES ? nullptr : static_cast<ReadScope*>(FlsGetValue(scopeSlot));
++    if (scope && !name.empty() && name != scope->expected) {
++        std::error_code error;
++        const auto canonical = fs::weakly_canonical(fs::path(name), error);
++        if (!error && Lower(canonical.wstring()) == scope->expected) name = scope->expected;
++        else {
++            const auto file = fs::path(name).filename().wstring();
++            const auto expectedFile = fs::path(scope->expected).filename().wstring();
++            const auto extension = Lower(fs::path(file).extension().wstring());
++            if (file == expectedFile || extension == L".manifest" || extension == L".man") return static_cast<NTSTATUS>(0xC0000022L);
++        }
++    }
++    if (!scope || name != scope->expected) return realNtCreateFile(handle, access, attributes, io, allocation, fileAttributes, share, disposition, options, ea, eaLength);
++    const auto current = Acquire();
++    constexpr ACCESS_MASK writes = GENERIC_WRITE | GENERIC_ALL | MAXIMUM_ALLOWED | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | DELETE | WRITE_DAC | WRITE_OWNER;
++    const auto sameLease = [&](const std::shared_ptr<const Snapshot>& candidate) {
++        return candidate && candidate->steamId == scope->snapshot->steamId && candidate->generation == scope->snapshot->generation &&
++            candidate->rentalId == scope->snapshot->rentalId && candidate->grantId == scope->snapshot->grantId && candidate->revision == scope->snapshot->revision;
++    };
++    if (!sameLease(current) || (access & writes) || (options & 0x1000 /* FILE_DELETE_ON_CLOSE */) || disposition != 1 /* FILE_OPEN */ || !SafePath(scope->target.path)) {
++        if (handle) *handle = nullptr;
++        if (io) { io->Status = static_cast<NTSTATUS>(0xC0000022L); io->Information = 0; }
++        return static_cast<NTSTATUS>(0xC0000022L);
++    }
++    std::unique_ptr<WriterLock> lease;
++    try {
++        lease = std::make_unique<WriterLock>();
++        const auto bytes = Read(scope->target.path, static_cast<size_t>(scope->target.size));
++        if (bytes.size() != scope->target.size || Sha(bytes) != scope->target.sha) return static_cast<NTSTATUS>(0xC0000022L);
++    } catch (...) { return static_cast<NTSTATUS>(0xC0000022L); }
++    const auto finalAuthorization = Acquire();
++    if (!sameLease(finalAuthorization)) return static_cast<NTSTATUS>(0xC0000022L);
++    auto destination = scope->target.path.lexically_normal();
++    destination.make_preferred(); // NtCreateFile does not normalize '/' like Win32.
++    auto target = L"\\??\\" + destination.wstring();
++    if (target.size() > 16382) return static_cast<NTSTATUS>(0xC0000033L);
++    UNICODE_STRING targetName{}; targetName.Buffer = target.data(); targetName.Length = static_cast<USHORT>(target.size() * sizeof(wchar_t)); targetName.MaximumLength = targetName.Length;
++    OBJECT_ATTRIBUTES redirected = *attributes; redirected.RootDirectory = nullptr; redirected.ObjectName = &targetName;
++    const auto result = realNtCreateFile(handle, access, &redirected, io, allocation, fileAttributes, share & FILE_SHARE_READ, disposition,
++        options | FILE_OPEN_REPARSE_POINT, ea, eaLength);
++    if (result >= 0 && handle && *handle) {
++        std::lock_guard lock(state.handlesMutex);
++        state.readHandles[*handle] = {current->steamId, current->generation, current->deadlineTicks, current->rentalId, current->grantId, current->revision};
++    }
++    return result;
++    } catch (...) { return static_cast<NTSTATUS>(0xC0000022L); }
++}
++}
++
++bool Start(const fs::path& steamRoot) {
++    if (state.started.exchange(true)) return state.readAdapterReady;
++    std::error_code error;
++    state.steamRoot = fs::weakly_canonical(steamRoot, error);
++    if (error || state.steamRoot.empty()) { NestGStartup::Write("rental.start.failed"); return false; }
++    state.readAdapterReady = InstallReadAdapter();
++    if (!state.readAdapterReady) { NestGStartup::Write("rental.read_adapter.failed"); return false; }
++    std::thread(Run).detach();
++    std::thread(Guard).detach();
++    if (!RentalStatusPipe::Start(CaptureStatus)) NestGStartup::Write("rental.status.unavailable");
++    NestGStartup::Write("rental.monitor.started");
++    return true;
++}
++std::shared_ptr<const Snapshot> Acquire() {
++    auto snapshot = state.active.load();
++    if (!snapshot || GetTickCount64() >= snapshot->deadlineTicks) return {};
++    const auto identity = RentalIdentity::Capture();
++    if (!identity.observerReady || identity.state != RentalIdentity::State::Authenticated || identity.generation != snapshot->generation || identity.steamId != snapshot->steamId) return {};
++    return snapshot;
++}
++RentalStatusPipe::Reply CaptureStatus(const RentalStatusPipe::Request& request) {
++    RentalStatusPipe::Reply result;
++    static const std::string instance = RequestId();
++    result.runtimeInstanceId = instance;
++    const auto identity = RentalIdentity::Capture();
++    result.identityEpoch = identity.generation;
++    if (!identity.observerReady) return result;
++    if (identity.state == RentalIdentity::State::Pending || identity.state == RentalIdentity::State::SignedOut) {
++        result.state = "pending"; return result;
++    }
++    if (identity.state != RentalIdentity::State::Authenticated) return result;
++    result.actualSteamId64 = std::to_string(identity.steamId);
++    if (result.actualSteamId64 != request.steamId64) { result.state = "wrong_account"; return result; }
++    result.state = "authenticated";
++    if (!state.readAdapterReady || !Hooks_Manifest::RentalReadReady() || !Hooks_Package::RentalIsolationReady()) {
++        result.state = "unavailable"; return result;
++    }
++    auto snapshot = Acquire();
++    if (!snapshot) {
++        const auto inactive = state.inactive.load();
++        if (inactive && inactive->steamId == identity.steamId && inactive->generation == identity.generation &&
++            inactive->rentalId == request.rentalId && inactive->steamAccountId == request.steamAccountId &&
++            inactive->installationId == request.installationId && inactive->grantId == request.grantId && inactive->revision == request.revision)
++            result.state = inactive->status;
++        return result;
++    }
++    if (snapshot->rentalId != request.rentalId || snapshot->steamAccountId != request.steamAccountId ||
++        snapshot->installationId != request.installationId || snapshot->grantId != request.grantId || snapshot->revision != request.revision)
++        return result;
++    try {
++        // Status is read-only and never renews a lease. Reopen the actual
++        // protected proof/control so a deleted/rotated grant cannot confirm.
++        WriterLock lease(false);
++        auto control = LoadControl(snapshot->root);
++        const bool currentControl = control.steamId == result.actualSteamId64 && control.rentalId == snapshot->rentalId &&
++            control.steamAccountId == snapshot->steamAccountId && control.installationId == snapshot->installationId &&
++            control.grantId == snapshot->grantId && control.revision == snapshot->revision;
++        SecureZeroMemory(control.grant.data(), control.grant.size());
++        const auto current = RentalIdentity::Capture();
++        const auto authorized = Acquire();
++        if (!currentControl || !authorized || current.generation != identity.generation || current.steamId != identity.steamId ||
++            authorized->generation != snapshot->generation || authorized->grantId != snapshot->grantId ||
++            authorized->rentalId != snapshot->rentalId || authorized->revision != snapshot->revision) {
++            result.state = "unavailable"; return result;
++        }
++        const auto now = GetTickCount64();
++        if (authorized->deadlineTicks <= now || authorized->deadlineTicks - now > kMaximumAllowanceMs) return result;
++        result.state = "ready"; result.remainingAuthorizationMs = authorized->deadlineTicks - now;
++        result.rentalId = authorized->rentalId; result.steamAccountId = authorized->steamAccountId;
++        result.installationId = authorized->installationId; result.grantId = authorized->grantId; result.revision = authorized->revision;
++    } catch (...) { result.state = "unavailable"; }
++    return result;
++}
++bool IsReservedPath(const fs::path& path) {
++    auto contains = [](const fs::path& value) { for (const auto& component : value) if (Lower(component.wstring()) == L"nestg-rentals") return true; return false; };
++    if (contains(path.lexically_normal())) return true;
++    std::error_code error; const auto resolved = fs::weakly_canonical(path, error);
++    return !error && contains(resolved);
++}
++bool IsTrackedDepot(uint32_t app, uint32_t depot) {
++    std::lock_guard lock(state.changes); return state.everTracked.count(depot) || state.everTracked.count(app);
++}
++std::vector<uint32_t> TakeAdded() { std::lock_guard lock(state.changes); std::vector<uint32_t> result; result.swap(state.additions); return result; }
++std::vector<uint32_t> TakeRemoved() { std::lock_guard lock(state.changes); std::vector<uint32_t> result; result.swap(state.removals); return result; }
++bool InstallReadAdapter() {
++    if (realNtCreateFile) return state.readAdapterReady;
++    scopeSlot = FlsAlloc(nullptr); if (scopeSlot == FLS_OUT_OF_INDEXES) return false;
++    realNtCreateFile = reinterpret_cast<NtCreateFileFunction>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateFile"));
++    realNtReadFile = reinterpret_cast<NtReadFileFunction>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtReadFile"));
++    realNtClose = reinterpret_cast<NtCloseFunction>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtClose"));
++    realNtCreateSection = reinterpret_cast<NtCreateSectionFunction>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateSection"));
++    realNtDuplicateObject = reinterpret_cast<NtDuplicateObjectFunction>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtDuplicateObject"));
++    if (!realNtCreateFile || !realNtReadFile || !realNtClose || !realNtCreateSection || !realNtDuplicateObject) return false;
++    if (!OSTPlatform::Detour::BeginTransaction()) return false;
++    bool attached = OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&realNtCreateFile), reinterpret_cast<void*>(ReadAdapter));
++    attached = OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&realNtReadFile), reinterpret_cast<void*>(ReadHandleAdapter)) && attached;
++    attached = OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&realNtClose), reinterpret_cast<void*>(CloseHandleAdapter)) && attached;
++    attached = OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&realNtCreateSection), reinterpret_cast<void*>(SectionAdapter)) && attached;
++    attached = OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&realNtDuplicateObject), reinterpret_cast<void*>(DuplicateAdapter)) && attached;
++    const bool committed = OSTPlatform::Detour::CommitTransaction();
++    return attached && committed;
++}
++ManifestReadScope::ManifestReadScope(uint32_t app, uint32_t depot, uint64_t gid, bool eligible) {
++    if (scopeSlot == FLS_OUT_OF_INDEXES || !eligible || !depot || !gid) return;
++    auto snapshot = Acquire();
++    if (!snapshot || (!snapshot->data.depotKeys.count(app) && !snapshot->data.depotKeys.count(depot))) return;
++    const auto name = std::to_wstring(depot) + L"_" + std::to_wstring(gid) + L".manifest";
++    auto file = snapshot->manifestFiles.find(std::to_wstring(app) + L"/" + name);
++    if (file == snapshot->manifestFiles.end()) {
++        // Steam can identify a DLC's manifest with its DLC AppID while the
++        // authenticated package belongs to the base AppID. A depot/gid match
++        // across authorized packages is usable only when every copy agrees.
++        const auto suffix = L"/" + name;
++        for (auto candidate = snapshot->manifestFiles.begin(); candidate != snapshot->manifestFiles.end(); ++candidate) {
++            if (!candidate->first.ends_with(suffix)) continue;
++            if (file != snapshot->manifestFiles.end() && (file->second.sha != candidate->second.sha || file->second.size != candidate->second.size)) {
++                file = snapshot->manifestFiles.end(); break;
++            }
++            file = candidate;
++        }
++    }
++    // A missing private manifest must fail closed rather than read a matching
++    // unscoped common-cache file.
++    auto* scope = new ReadScope{snapshot, Lower((state.steamRoot / L"depotcache" / name).lexically_normal().wstring()),
++        file == snapshot->manifestFiles.end() ? Snapshot::ManifestFile{} : file->second};
++    previous = FlsGetValue(scopeSlot);
++    if (!FlsSetValue(scopeSlot, scope)) { delete scope; return; }
++    current = scope;
++}
++ManifestReadScope::~ManifestReadScope() {
++    if (current) { FlsSetValue(scopeSlot, previous); delete static_cast<ReadScope*>(current); }
++}
++RetailLuaScope::RetailLuaScope() { ++retailLuaDepth; }
++RetailLuaScope::~RetailLuaScope() { --retailLuaDepth; }
++}
++
++extern "C" __declspec(dllexport) unsigned WINAPI NestGRentalRuntimeProtocolVersion() { return 1; }
++extern "C" __declspec(dllexport) unsigned WINAPI NestGRentalRuntimeCapabilities() {
++    // Implemented protocol capabilities, not an assertion of live Steam health.
++    // Live readiness additionally requires both packet hooks, both manifest
++    // hooks, the filesystem adapter and a successful authenticated lease check.
++    return 0x3F; // identity, scoped data, private reads, DPAPI vault, epochs, read-only confirmation.
++}
+diff --git a/src/NestG/RentalRuntime.h b/src/NestG/RentalRuntime.h
+new file mode 100644
+index 0000000..6d2164e
+--- /dev/null
++++ b/src/NestG/RentalRuntime.h
+@@ -0,0 +1,52 @@
++#pragma once
++#include "RentalData.h"
++#include "RentalStatusPipe.h"
++#include <filesystem>
++#include <memory>
++#include <string>
++#include <vector>
++
++namespace NestGRental {
++struct Snapshot {
++    struct ManifestFile { std::filesystem::path path; uint64_t size = 0; std::string sha; };
++    uint64_t steamId = 0;
++    uint64_t generation = 0;
++    uint64_t deadlineTicks = 0;
++    std::string rentalId;
++    std::string grantId;
++    std::string revision;
++    std::string steamAccountId;
++    std::string installationId;
++    std::filesystem::path root;
++    Data data;
++    // Only validated inventory files may be routed; no path is constructed from
++    // arbitrary Lua text or from a Steam-supplied filename.
++    std::map<std::wstring, ManifestFile> manifestFiles;
++};
++
++bool Start(const std::filesystem::path& steamRoot);
++std::shared_ptr<const Snapshot> Acquire();
++RentalStatusPipe::Reply CaptureStatus(const RentalStatusPipe::Request& request);
++bool IsReservedPath(const std::filesystem::path& path);
++bool IsTrackedDepot(uint32_t app, uint32_t depot);
++std::vector<uint32_t> TakeAdded();
++std::vector<uint32_t> TakeRemoved();
++
++// Scope lives on a Windows fiber (Steam switches cooperative jobs on the same
++// OS thread). A thread_local scope would leak a rental read into another job.
++class ManifestReadScope {
++    void* previous = nullptr;
++    void* current = nullptr;
++public:
++    ManifestReadScope(uint32_t app, uint32_t depot, uint64_t gid, bool eligible = true);
++    ~ManifestReadScope();
++    ManifestReadScope(const ManifestReadScope&) = delete;
++    ManifestReadScope& operator=(const ManifestReadScope&) = delete;
++};
++bool InstallReadAdapter();
++class RetailLuaScope {
++public:
++    RetailLuaScope();
++    ~RetailLuaScope();
++};
++}
+diff --git a/src/NestG/RentalStatusPipe.cpp b/src/NestG/RentalStatusPipe.cpp
+new file mode 100644
+index 0000000..38b004a
+--- /dev/null
++++ b/src/NestG/RentalStatusPipe.cpp
+@@ -0,0 +1,257 @@
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include "RentalStatusPipe.h"
++#include "RentalJson.h"
++#include "RentalIdentity.h"
++#include <windows.h>
++#include <sddl.h>
++#include <array>
++#include <atomic>
++#include <memory>
++#include <mutex>
++#include <thread>
++#include <vector>
++
++namespace RentalStatusPipe {
++namespace {
++constexpr DWORD kFrameLimit = 4096, kIoBudgetMs = 2000;
++struct Handle {
++    HANDLE value = INVALID_HANDLE_VALUE;
++    explicit Handle(HANDLE handle = INVALID_HANDLE_VALUE) : value(handle) {}
++    ~Handle() { if (value && value != INVALID_HANDLE_VALUE) CloseHandle(value); }
++    Handle(const Handle&) = delete;
++};
++struct LocalMemory { void* value = nullptr; ~LocalMemory() { if (value) LocalFree(value); } };
++struct Context {
++    std::vector<BYTE> user, logon;
++    DWORD session = 0;
++    LUID authentication{};
++};
++std::vector<BYTE> TokenValue(HANDLE token, TOKEN_INFORMATION_CLASS kind) {
++    DWORD size = 0;
++    GetTokenInformation(token, kind, nullptr, 0, &size);
++    if (!size || size > 65536) throw std::runtime_error("status_token");
++    std::vector<BYTE> bytes(size);
++    if (!GetTokenInformation(token, kind, bytes.data(), size, &size)) throw std::runtime_error("status_token");
++    return bytes;
++}
++std::vector<BYTE> CopySid(PSID sid) {
++    if (!IsValidSid(sid)) throw std::runtime_error("status_sid");
++    std::vector<BYTE> result(GetLengthSid(sid));
++    if (!::CopySid(static_cast<DWORD>(result.size()), result.data(), sid)) throw std::runtime_error("status_sid");
++    return result;
++}
++Context ProcessContext(HANDLE process) {
++    HANDLE raw = nullptr;
++    if (!OpenProcessToken(process, TOKEN_QUERY, &raw)) throw std::runtime_error("status_token");
++    Handle token(raw);
++    auto user = TokenValue(token.value, TokenUser);
++    auto groups = TokenValue(token.value, TokenGroups);
++    auto statistics = TokenValue(token.value, TokenStatistics);
++    auto session = TokenValue(token.value, TokenSessionId);
++    Context result;
++    result.user = CopySid(reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid);
++    const auto* items = reinterpret_cast<TOKEN_GROUPS*>(groups.data());
++    if (items->GroupCount > 1024) throw std::runtime_error("status_groups");
++    for (DWORD index = 0; index < items->GroupCount; ++index) {
++        if ((items->Groups[index].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID) {
++            if (!result.logon.empty()) throw std::runtime_error("status_logon");
++            result.logon = CopySid(items->Groups[index].Sid);
++        }
++    }
++    if (result.logon.empty()) throw std::runtime_error("status_logon");
++    result.authentication = reinterpret_cast<TOKEN_STATISTICS*>(statistics.data())->AuthenticationId;
++    result.session = *reinterpret_cast<DWORD*>(session.data());
++    return result;
++}
++bool EqualContext(const Context& left, const Context& right) {
++    return left.session == right.session && left.authentication.LowPart == right.authentication.LowPart &&
++        left.authentication.HighPart == right.authentication.HighPart &&
++        EqualSid(const_cast<BYTE*>(left.user.data()), const_cast<BYTE*>(right.user.data())) &&
++        EqualSid(const_cast<BYTE*>(left.logon.data()), const_cast<BYTE*>(right.logon.data()));
++}
++bool PeerAllowed(HANDLE pipe, const Context& own) {
++    ULONG pid = 0;
++    if (!GetNamedPipeClientProcessId(pipe, &pid) || !pid) return false;
++    Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
++    if (process.value == INVALID_HANDLE_VALUE || !process.value || WaitForSingleObject(process.value, 0) != WAIT_TIMEOUT) return false;
++    try { return EqualContext(own, ProcessContext(process.value)); } catch (...) { return false; }
++}
++struct Server {
++    std::mutex mutex;
++    Provider provider;
++    HANDLE stop = nullptr, finished = nullptr;
++    std::atomic<bool> started{false};
++    std::wstring name;
++};
++auto& server = *new Server;
++struct Operation {
++    OVERLAPPED overlap{};
++    Handle event{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
++    std::array<char, kFrameLimit> bytes{};
++    Operation() { if (!event.value) throw std::runtime_error("status_event"); overlap.hEvent = event.value; }
++};
++bool Finish(HANDLE pipe, std::unique_ptr<Operation>& operation, DWORD& transferred, ULONGLONG deadline, bool& poisoned) {
++    HANDLE waits[]{server.stop, operation->event.value};
++    const auto now = GetTickCount64();
++    const DWORD timeout = deadline > now ? static_cast<DWORD>(deadline - now) : 0;
++    const DWORD waited = WaitForMultipleObjects(2, waits, FALSE, timeout);
++    if (waited == WAIT_OBJECT_0 + 1) return GetOverlappedResult(pipe, &operation->overlap, &transferred, FALSE) != FALSE;
++    CancelIoEx(pipe, &operation->overlap);
++    // A pathological kernel cancellation must not hold this worker forever or
++    // free an OVERLAPPED/buffer still owned by the kernel. Retain at most this
++    // single operation and disable the endpoint if cancellation cannot drain.
++    if (WaitForSingleObject(operation->event.value, 1000) != WAIT_OBJECT_0) {
++        operation.release(); poisoned = true;
++    }
++    return false;
++}
++bool ReadFrame(HANDLE pipe, std::string& frame, bool& poisoned) {
++    const auto deadline = GetTickCount64() + kIoBudgetMs;
++    while (frame.size() < kFrameLimit) {
++        auto operation = std::make_unique<Operation>();
++        DWORD count = 0;
++        const DWORD limit = kFrameLimit - static_cast<DWORD>(frame.size());
++        const BOOL completed = ReadFile(pipe, operation->bytes.data(), limit, &count, &operation->overlap);
++        if (!completed && (GetLastError() != ERROR_IO_PENDING || !Finish(pipe, operation, count, deadline, poisoned))) return false;
++        if (!count) return false;
++        frame.append(operation->bytes.data(), count);
++        const auto newline = frame.find('\n');
++        if (newline != std::string::npos) return newline + 1 == frame.size();
++        if (GetTickCount64() >= deadline) return false;
++    }
++    return false;
++}
++bool WriteFrame(HANDLE pipe, const std::string& frame, bool& poisoned) {
++    if (frame.size() > kFrameLimit) return false;
++    auto operation = std::make_unique<Operation>();
++    std::copy(frame.begin(), frame.end(), operation->bytes.begin());
++    DWORD written = 0;
++    const BOOL completed = WriteFile(pipe, operation->bytes.data(), static_cast<DWORD>(frame.size()), &written, &operation->overlap);
++    if (!completed && (GetLastError() != ERROR_IO_PENDING || !Finish(pipe, operation, written, GetTickCount64() + kIoBudgetMs, poisoned))) return false;
++    return written == frame.size();
++}
++void Run(HANDLE pipe, Context own) {
++    Handle endpoint(pipe);
++    try {
++        while (WaitForSingleObject(server.stop, 0) == WAIT_TIMEOUT) {
++            bool poisoned = false;
++            auto operation = std::make_unique<Operation>();
++            const BOOL connected = ConnectNamedPipe(endpoint.value, &operation->overlap);
++            const DWORD error = connected ? ERROR_SUCCESS : GetLastError();
++            if (!connected && error == ERROR_IO_PENDING) {
++                DWORD unused = 0;
++                // Connect itself can wait for a client, but the stop event
++                // remains in the wait set and always interrupts this wait.
++                if (!Finish(endpoint.value, operation, unused, GetTickCount64() + 60000, poisoned)) {
++                    if (poisoned) break;
++                    DisconnectNamedPipe(endpoint.value); continue;
++                }
++            } else if (!connected && error != ERROR_PIPE_CONNECTED) break;
++            std::string frame;
++            if (PeerAllowed(endpoint.value, own) && ReadFrame(endpoint.value, frame, poisoned)) {
++                try {
++                    const auto request = ParseRequest(frame);
++                    auto reply = server.provider(request);
++                    if (WriteFrame(endpoint.value, SerializeReply(request, reply), poisoned)) {
++                        // A completed buffered write is not proof the client read
++                        // it. Wait boundedly for its close before disconnecting;
++                        // FlushFileBuffers would let a stalled client block us.
++                        auto close = std::make_unique<Operation>();
++                        DWORD ignored = 0;
++                        if (!ReadFile(endpoint.value, close->bytes.data(), 1, &ignored, &close->overlap) && GetLastError() == ERROR_IO_PENDING)
++                            Finish(endpoint.value, close, ignored, GetTickCount64() + kIoBudgetMs, poisoned);
++                    }
++                } catch (...) { /* Invalid frames receive no partial or reflected response. */ }
++            }
++            DisconnectNamedPipe(endpoint.value);
++            if (poisoned) break;
++        }
++    } catch (...) { /* Read-only confirmation remains unavailable. */ }
++    SetEvent(server.finished);
++}
++bool Hex(const std::string& value, size_t length) {
++    return value.size() == length && value.find_first_not_of("0123456789abcdef") == std::string::npos;
++}
++bool Guid(const std::string& value) {
++    if (value.size() != 36 || value == "00000000-0000-0000-0000-000000000000") return false;
++    for (size_t index = 0; index < value.size(); ++index)
++        if ((index == 8 || index == 13 || index == 18 || index == 23) ? value[index] != '-' : std::string_view("0123456789abcdef").find(value[index]) == std::string_view::npos) return false;
++    return true;
++}
++}
++Request ParseRequest(const std::string& frame) {
++    if (frame.empty() || frame.size() > kFrameLimit || frame.back() != '\n' || frame.find('\n') != frame.size() - 1 ||
++        std::any_of(frame.begin(), frame.end(), [](unsigned char byte) { return byte > 127; })) throw std::runtime_error("status_frame");
++    const auto json = NestGRental::JsonParser(frame).Parse();
++    if (json.type != NestGRental::Json::Type::Object || json.object.size() != 8 || json.At("protocolVersion").Number() != 1) throw std::runtime_error("status_request");
++    Request request{json.At("nonce").String(), json.At("rentalId").String(), json.At("steamAccountId").String(),
++        json.At("steamId64").String(), json.At("installationId").String(), json.At("grantId").String(), json.At("revision").String()};
++    uint64_t steamId = 0;
++    if (!Hex(request.nonce, 64) || !Hex(request.revision, 64) || !Guid(request.rentalId) || !Guid(request.steamAccountId) ||
++        !Guid(request.installationId) || !Guid(request.grantId) || request.steamId64.size() != 17 ||
++        !NestGRental::Decimal(request.steamId64, steamId) || !RentalIdentity::Tracker::IsIndividualSteamId(steamId)) throw std::runtime_error("status_scope");
++    return request;
++}
++std::string SerializeReply(const Request& request, const Reply& reply) {
++    if (!Guid(reply.runtimeInstanceId) || reply.remainingAuthorizationMs > 120000 ||
++        (reply.state != "pending" && reply.state != "authenticated" && reply.state != "ready" && reply.state != "wrong_account" &&
++         reply.state != "unavailable" && reply.state != "expired" && reply.state != "revoked")) throw std::runtime_error("status_reply");
++    if (reply.state == "ready" && (reply.rentalId != request.rentalId || reply.steamAccountId != request.steamAccountId ||
++        reply.installationId != request.installationId || reply.grantId != request.grantId || reply.revision != request.revision ||
++        reply.actualSteamId64 != request.steamId64 || !reply.remainingAuthorizationMs)) throw std::runtime_error("status_ready");
++    const auto quote = [](const std::string& value) {
++        if (value.find_first_not_of("0123456789abcdef-_abcdefghijklmnopqrstuvwxyz") != std::string::npos) throw std::runtime_error("status_text");
++        return "\"" + value + "\"";
++    };
++    auto result = "{\"protocolVersion\":1,\"nonce\":" + quote(request.nonce) + ",\"runtimeInstanceId\":" + quote(reply.runtimeInstanceId) +
++        ",\"identityEpoch\":" + std::to_string(reply.identityEpoch) + ",\"actualSteamId64\":" + quote(reply.actualSteamId64) +
++        ",\"state\":" + quote(reply.state) + ",\"remainingAuthorizationMs\":" + std::to_string(reply.remainingAuthorizationMs) +
++        ",\"rentalId\":" + quote(reply.rentalId) + ",\"steamAccountId\":" + quote(reply.steamAccountId) +
++        ",\"installationId\":" + quote(reply.installationId) + ",\"grantId\":" + quote(reply.grantId) + ",\"revision\":" + quote(reply.revision) + "}\n";
++    if (result.size() > kFrameLimit) throw std::runtime_error("status_frame");
++    return result;
++}
++std::wstring PipeName() {
++    FILETIME created{}, exited{}, kernel{}, user{};
++    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) throw std::runtime_error("status_process");
++    const uint64_t time = (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
++    return L"\\\\.\\pipe\\NestG.RentalStatus." + std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(time);
++}
++bool Start(Provider provider) {
++    std::lock_guard lock(server.mutex);
++    if (server.started.load()) return false;
++    try {
++        const auto own = ProcessContext(GetCurrentProcess());
++        LocalMemory logonText;
++        if (!ConvertSidToStringSidW(const_cast<BYTE*>(own.logon.data()), reinterpret_cast<LPWSTR*>(&logonText.value))) return false;
++        const auto descriptor = L"D:P(A;;GRGW;;;" + std::wstring(static_cast<wchar_t*>(logonText.value)) + L")(A;;GA;;;SY)";
++        LocalMemory security;
++        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(descriptor.c_str(), SDDL_REVISION_1, &security.value, nullptr)) return false;
++        SECURITY_ATTRIBUTES attributes{sizeof(attributes), security.value, FALSE};
++        server.name = PipeName();
++        HANDLE pipe = CreateNamedPipeW(server.name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
++            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, kFrameLimit, kFrameLimit, kIoBudgetMs, &attributes);
++        if (pipe == INVALID_HANDLE_VALUE) return false;
++        server.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
++        server.finished = CreateEventW(nullptr, TRUE, FALSE, nullptr);
++        if (!server.stop || !server.finished) { CloseHandle(pipe); if (server.stop) CloseHandle(server.stop); if (server.finished) CloseHandle(server.finished); return false; }
++        server.provider = std::move(provider);
++        server.started.store(true);
++        try { std::thread(Run, pipe, own).detach(); }
++        catch (...) { server.started.store(false); CloseHandle(pipe); CloseHandle(server.stop); CloseHandle(server.finished); return false; }
++        return true;
++    } catch (...) { return false; }
++}
++void Stop() {
++    std::lock_guard lock(server.mutex);
++    if (!server.started.load()) return;
++    SetEvent(server.stop);
++    if (WaitForSingleObject(server.finished, 4000) == WAIT_OBJECT_0) {
++        CloseHandle(server.stop); CloseHandle(server.finished);
++        server.stop = server.finished = nullptr; server.provider = {}; server.started.store(false);
++    }
++}
++}
++extern "C" __declspec(dllexport) unsigned WINAPI NestGRentalStatusProtocolVersion() { return 1; }
+diff --git a/src/NestG/RentalStatusPipe.h b/src/NestG/RentalStatusPipe.h
+new file mode 100644
+index 0000000..8585ee5
+--- /dev/null
++++ b/src/NestG/RentalStatusPipe.h
+@@ -0,0 +1,26 @@
++#pragma once
++#include <cstdint>
++#include <functional>
++#include <string>
++
++namespace RentalStatusPipe {
++struct Request {
++    std::string nonce, rentalId, steamAccountId, steamId64, installationId, grantId, revision;
++};
++struct Reply {
++    std::string runtimeInstanceId;
++    std::uint64_t identityEpoch = 0;
++    std::string actualSteamId64;
++    std::string state = "unavailable";
++    std::uint64_t remainingAuthorizationMs = 0;
++    std::string rentalId, steamAccountId, installationId, grantId, revision;
++};
++using Provider = std::function<Reply(const Request&)>;
++// One read-only endpoint per runtime process. No request mutates identity,
++// credentials, a server lease, configuration, or rental payloads.
++bool Start(Provider provider);
++void Stop();
++std::wstring PipeName();
++Request ParseRequest(const std::string& frame);
++std::string SerializeReply(const Request& request, const Reply& reply);
++}
+diff --git a/src/Utils/Config/LuaConfig.cpp b/src/Utils/Config/LuaConfig.cpp
+index 1094579..dec6b57 100644
+--- a/src/Utils/Config/LuaConfig.cpp
++++ b/src/Utils/Config/LuaConfig.cpp
+@@ -4,6 +4,9 @@
+ #include "Utils/Config/LuaConfig.h"
+ #include "Utils/SteamMetadata/StatsClient.h"
+ #include "Utils/Tickets/AppTicket.h"
++#include "NestG/RentalRuntime.h"
++#include "NestG/RentalIdentity.h"
++#include <mutex>
+ 
+ #include <lua.hpp>
+ 
+@@ -21,6 +24,11 @@ extern "C" {
+ }
+ 
+ namespace LuaConfig{
++    // Runtime publication, Steam hooks and the existing file watcher share the
++    // retail query surface. Keep that surface serialized; rental data itself
++    // remains immutable and is never written into these maps.
++    static auto& g_dataMutex = *new std::recursive_mutex;
++    static uint64_t g_ownedIdentityGeneration = UINT64_MAX;
+     static lua_State* g_lua_state = nullptr;
+     static bool g_hasManifestCodeFunc = false;
+     static bool g_hasManifestCodeFuncEx = false;
+@@ -537,6 +545,7 @@ namespace LuaConfig{
+ 
+     // ── public query API ─────────────────────────────────────────
+     AppId_t GetAppIdForProcess(const std::string& imageName) {
++        std::lock_guard lock(g_dataMutex);
+         std::string lower(imageName);
+         for (char& ch : lower)
+             ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+@@ -545,6 +554,7 @@ namespace LuaConfig{
+     }
+ 
+     bool IsForcedDenuvo(AppId_t appId) {
++        std::lock_guard lock(g_dataMutex);
+         return ForcedDenuvoSet.count(appId) > 0;
+     }
+ 
+@@ -553,14 +563,24 @@ namespace LuaConfig{
+     }
+ 
+     bool HasDepot(AppId_t DepotId,bool excludeOwned) {
+-        return DepotKeySet.count(DepotId) && (!excludeOwned || !IsOwned(DepotId));
++        std::lock_guard lock(g_dataMutex);
++        const auto rental = NestGRental::Acquire();
++        return (DepotKeySet.count(DepotId) || (rental && rental->data.depotKeys.count(DepotId))) && (!excludeOwned || !IsOwned(DepotId));
+     }
+ 
++    bool HasRetailDepot(AppId_t id) { std::lock_guard lock(g_dataMutex); return DepotKeySet.count(id) > 0; }
++
+     bool IsOwned(AppId_t AppId) {
++        std::lock_guard lock(g_dataMutex);
++        const auto generation = RentalIdentity::Capture().generation;
++        if (generation != g_ownedIdentityGeneration) { OwnedAppIdSet.clear(); g_ownedIdentityGeneration = generation; }
+         return OwnedAppIdSet.count(AppId);
+     }
+ 
+     void MarkOwned(AppId_t AppId) {
++        std::lock_guard lock(g_dataMutex);
++        const auto generation = RentalIdentity::Capture().generation;
++        if (generation != g_ownedIdentityGeneration) { OwnedAppIdSet.clear(); g_ownedIdentityGeneration = generation; }
+         if(!OwnedAppIdSet.count(AppId)) {
+             LOG_PACKAGE_INFO("Marking app {} as owned", AppId);
+             OwnedAppIdSet.insert(AppId);
+@@ -568,15 +588,29 @@ namespace LuaConfig{
+     }
+ 
+     std::vector<AppId_t> GetAllDepotIds() {
++        std::lock_guard lock(g_dataMutex);
+         std::vector<AppId_t> DepotIds;
+         for (const auto& pair : DepotKeySet) {
+             DepotIds.push_back(pair.first);
+         }
++        if (const auto rental = NestGRental::Acquire())
++            for (const auto& [id, key] : rental->data.depotKeys)
++                if (!DepotKeySet.count(id)) DepotIds.push_back(id);
+         return DepotIds;
+     }
+ 
+     std::vector<uint8> GetDecryptionKey(AppId_t DepotId) {
++        std::lock_guard lock(g_dataMutex);
+         std::vector<uint8> keyBytes;
++        const auto rental = NestGRental::Acquire();
++        if (!DepotKeySet.count(DepotId) && rental) {
++            const auto found = rental->data.depotKeys.find(DepotId);
++            if (found != rental->data.depotKeys.end()) {
++                for (size_t i = 0; i < found->second.size(); i += 2)
++                    keyBytes.push_back(ParseHexByte(std::string_view(found->second).substr(i, 2)));
++                return keyBytes;
++            }
++        }
+         if (DepotKeySet.count(DepotId)) {
+             const std::string& keyStr = DepotKeySet[DepotId];
+             // Convert hex string to byte vector.
+@@ -588,13 +622,19 @@ namespace LuaConfig{
+     }
+ 
+     uint64_t GetAccessToken(AppId_t AppId) {
++        std::lock_guard lock(g_dataMutex);
+         if (AccessTokenSet.count(AppId)) {
+             return AccessTokenSet[AppId];
+         }
++        if (const auto rental = DepotKeySet.count(AppId) ? nullptr : NestGRental::Acquire()) {
++            const auto found = rental->data.accessTokens.find(AppId);
++            if (found != rental->data.accessTokens.end()) return found->second;
++        }
+         return 0;
+     }
+ 
+     std::optional<std::string> GetLegacyCDKey(AppId_t AppId) {
++        std::lock_guard lock(g_dataMutex);
+         auto it = LegacyCDKeySet.find(AppId);
+         if (it != LegacyCDKeySet.end())
+             return it->second;
+@@ -602,12 +642,23 @@ namespace LuaConfig{
+     }
+ 
+     bool pinApp(AppId_t AppId) {
+-        return PinnedApps.count(AppId);
++        std::lock_guard lock(g_dataMutex);
++        if (PinnedApps.count(AppId)) return true;
++        if (const auto rental = DepotKeySet.count(AppId) ? nullptr : NestGRental::Acquire())
++            return std::find(rental->data.pinned.begin(), rental->data.pinned.end(), AppId) != rental->data.pinned.end();
++        return false;
+     }
+ 
+     uint64_t GetStatSteamId(AppId_t AppId) {
++        {
++        std::lock_guard lock(g_dataMutex);
+         if (StatSteamIdSet.count(AppId))
+             return StatSteamIdSet[AppId];
++        if (const auto rental = DepotKeySet.count(AppId) ? nullptr : NestGRental::Acquire()) {
++            const auto found = rental->data.statIds.find(AppId);
++            if (found != rental->data.statIds.end()) return found->second;
++        }
++        }
+         uint64_t apiSteamId = 0;
+         if (StatsClient::FetchStatSteamId(AppId, &apiSteamId))
+             return apiSteamId;
+@@ -615,19 +666,28 @@ namespace LuaConfig{
+     }
+ 
+     uint32_t GetPurchaseTime(AppId_t AppId) {
++        std::lock_guard lock(g_dataMutex);
+         auto it = g_purchaseTime.find(AppId);
+         return it != g_purchaseTime.end() ? it->second : 0;
+     }
+ 
+-    const std::unordered_map<uint64_t, ManifestOverride>& GetManifestOverrides() {
+-      return ManifestOverrides;
++    std::unordered_map<uint64_t, ManifestOverride> GetManifestOverrides() {
++        std::lock_guard lock(g_dataMutex);
++        auto result = ManifestOverrides;
++        if (const auto rental = NestGRental::Acquire())
++            for (const auto& [id, value] : rental->data.manifests)
++                if (!result.count(id) && !DepotKeySet.count(static_cast<AppId_t>(id))) result[id] = { value.gid, value.size };
++        return result;
+     }
+ 
+     bool HasManifestCodeFunc() {
++        std::lock_guard lock(g_dataMutex);
+         return g_hasManifestCodeFunc;
+     }
+ 
+     bool CallManifestFetchCode(uint64_t gid, uint64_t* outCode) {
++        std::lock_guard lock(g_dataMutex);
++        NestGRental::RetailLuaScope rentalExclusion;
+         if (!g_hasManifestCodeFunc || !g_lua_state)
+             return false;
+ 
+@@ -675,10 +735,13 @@ namespace LuaConfig{
+     }
+ 
+     bool HasManifestCodeFuncEx() {
++        std::lock_guard lock(g_dataMutex);
+         return g_hasManifestCodeFuncEx;
+     }
+ 
+     bool CallManifestFetchCodeEx(uint64_t app_id, uint64_t depot_id, uint64_t gid, uint64_t* outCode) {
++        std::lock_guard lock(g_dataMutex);
++        NestGRental::RetailLuaScope rentalExclusion;
+         if (!g_hasManifestCodeFuncEx || !g_lua_state)
+             return false;
+ 
+@@ -726,6 +789,7 @@ namespace LuaConfig{
+ 
+     // ── per-file unload ────────────────────────────────────────
+     void UnloadFile(const std::string& filePath) {
++        std::lock_guard lock(g_dataMutex);
+         auto depotsIt = g_fileDepots.find(filePath);
+         auto manifestIt = g_fileManifestOverrides.find(filePath);
+         if (depotsIt == g_fileDepots.end() && manifestIt == g_fileManifestOverrides.end()) return;
+@@ -765,19 +829,31 @@ namespace LuaConfig{
+     }
+ 
+     std::vector<AppId_t> TakePendingRemovals() {
++        std::lock_guard lock(g_dataMutex);
+         std::vector<AppId_t> result;
+         result.swap(g_pendingRemovals);
++        for (const auto id : NestGRental::TakeRemoved())
++            if (!DepotKeySet.count(id)) result.push_back(id);
++        const auto rental = NestGRental::Acquire();
++        result.erase(std::remove_if(result.begin(), result.end(), [&](AppId_t id) {
++            return DepotKeySet.count(id) || (rental && rental->data.depotKeys.count(id));
++        }), result.end());
+         return result;
+     }
+ 
+     std::vector<AppId_t> TakePendingAdditions() {
++        std::lock_guard lock(g_dataMutex);
+         std::vector<AppId_t> result;
+         result.swap(g_pendingAdditions);
++        const auto rental = NestGRental::Acquire();
++        for (const auto id : NestGRental::TakeAdded())
++            if (!DepotKeySet.count(id) && rental && rental->data.depotKeys.count(id)) result.push_back(id);
+         return result;
+     }
+ 
+     static std::vector<std::string> CollectLuaFiles(const std::string& directory) {
+         std::vector<std::string> files;
++        if (NestGRental::IsReservedPath(std::filesystem::u8path(directory))) return files;
+ 
+         std::error_code ec;
+         if (!std::filesystem::exists(directory, ec))
+@@ -796,6 +872,11 @@ namespace LuaConfig{
+ 
+     // ── single-file parser ──────────────────────────────────────
+     void ParseFile(const std::string& filePath) {
++        std::lock_guard lock(g_dataMutex);
++        // Reserved sources cannot enter the unrestricted retail VM, including
++        // through a configured path, a watcher event or a junction alias.
++        if (NestGRental::IsReservedPath(std::filesystem::u8path(filePath))) return;
++        NestGRental::RetailLuaScope rentalExclusion;
+         if (!Initialize()) return;
+ 
+         // Remove old entries from this file before re-parsing.
+@@ -898,7 +979,7 @@ namespace LuaConfig{
+         std::vector<std::string> out;
+         std::vector<std::string> seen;
+         auto add = [&](const std::string& dir) {
+-            if (dir.empty()) return;
++            if (dir.empty() || NestGRental::IsReservedPath(std::filesystem::u8path(dir))) return;
+             const std::string k = key(dir);
+             if (std::find(seen.begin(), seen.end(), k) != seen.end()) return;
+             seen.push_back(k);
+@@ -911,6 +992,7 @@ namespace LuaConfig{
+     }
+ 
+     void ParseDirectory(const std::string& directory) {
++        std::lock_guard lock(g_dataMutex);
+         if (!Initialize()) return;
+ 
+         for (const auto& filePath : CollectLuaFiles(directory)) {
+@@ -923,6 +1005,7 @@ namespace LuaConfig{
+     }
+ 
+     void ReloadDirectories(const std::vector<std::string>& directories, bool clearPendingAdditions) {
++        std::lock_guard lock(g_dataMutex);
+         if (!Initialize()) return;
+ 
+         std::unordered_set<std::string> activeFiles;
+diff --git a/src/Utils/Config/LuaConfig.h b/src/Utils/Config/LuaConfig.h
+index 40d5e1c..43afb8f 100644
+--- a/src/Utils/Config/LuaConfig.h
++++ b/src/Utils/Config/LuaConfig.h
+@@ -11,6 +11,7 @@
+ 
+ namespace LuaConfig{
+     bool HasDepot(AppId_t appId, bool checkOwned=true);
++    bool HasRetailDepot(AppId_t appId);
+     bool IsOwned(AppId_t appId);
+     void MarkOwned(AppId_t appId);
+     std::vector<AppId_t> GetAllDepotIds();
+@@ -27,7 +28,7 @@ namespace LuaConfig{
+           uint64_t gid;
+           uint64_t size;
+     };
+-    const std::unordered_map<uint64_t, ManifestOverride>& GetManifestOverrides();
++    std::unordered_map<uint64_t, ManifestOverride> GetManifestOverrides();
+ 
+     void ParseFile(const std::string& filePath);
+     void UnloadFile(const std::string& filePath);
+diff --git a/src/Utils/SteamMetadata/ManifestCache.cpp b/src/Utils/SteamMetadata/ManifestCache.cpp
+index a8ee1cc..88d35a1 100644
+--- a/src/Utils/SteamMetadata/ManifestCache.cpp
++++ b/src/Utils/SteamMetadata/ManifestCache.cpp
+@@ -4,6 +4,8 @@
+ #include "OSTPlatform/include/Http.h"
+ #include "Utils/Config/Config.h"
+ #include "Utils/Logging/Log.h"
++#include "NestG/RentalRuntime.h"
++#include "Utils/Config/LuaConfig.h"
+ 
+ #include <windows.h>
+ 
+@@ -133,6 +135,10 @@ bool EnsureCached(AppId_t app, uint32_t depot, uint64_t gid,
+                   bool bypassNegativeCache) {
+     if (outNotArchived) *outNotArchived = false;
+     if (!depot || !gid) return false;
++    // Rental manifests are supplied by the private read adapter. Never publish
++    // them into the common cache, even from an asynchronous job that outlives
++    // its account/authorization generation. Retail contributions keep priority.
++    if (!LuaConfig::HasRetailDepot(depot) && !LuaConfig::HasRetailDepot(app)) return false;
+ 
+     const fs::path dir = DepotCacheDir();
+     if (dir.empty()) {
+diff --git a/src/dllmain.cpp b/src/dllmain.cpp
+index f7ab639..b92db9d 100644
+--- a/src/dllmain.cpp
++++ b/src/dllmain.cpp
+@@ -1,182 +1,191 @@
+-#include "dllmain.h"
+-#include "NestG/StartupDiagnostics.h"
+-#include "OSTPlatform/include/Encoding.h"
+-#include "Hook/HookManager.h"
+-#include "Utils/Config/Config.h"
+-#include "Utils/Config/ConfigFileWatcher.h"
+-#include "Utils/Config/LuaFileWatcher.h"
+-#include "Utils/CloudRedirect/CloudRedirectHost.h"
+-#include "Utils/SteamMetadata/IPCLoader.h"
+-#include "Utils/SteamMetadata/ManifestDonor.h"
+-#include "Utils/SteamMetadata/PatternLoader.h"
+-#include "Utils/SteamMetadata/SteamDiagnostics.h"
+-#ifdef OST_ENABLE_UPDATER
+-#include "Utils/Update/AppUpdater.h"
+-#endif
+-#include "OSTPlatform/include/Dialog.h"
+-#include "OSTPlatform/include/DynamicLibrary.h"
+-#include "OSTPlatform/include/Thread.h"
+-
+-#include <string>
+-#include <windows.h>
+-
+-// prepare key runtime paths.
+-bool InitializeSteamComponents(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
+-{
+-    const std::string steamInstallPath = OSTPlatform::Encoding::WideToUtf8(OSTPlatform::DynamicLibrary::GetModuleDirectory(selfModule).wstring());
+-    if (steamInstallPath.empty()) {
+-        return false;
+-    }
+-    sprintf_s(SteamInstallPath, kRuntimePathCapacity, "%s", steamInstallPath.c_str());
+-    sprintf_s(SteamclientPath, kRuntimePathCapacity, "%s\\steamclient64.dll",  SteamInstallPath);
+-    sprintf_s(SteamUIPath,     kRuntimePathCapacity, "%s\\steamui.dll",        SteamInstallPath);
+-    sprintf_s(DiversionPath,   kRuntimePathCapacity, "%s\\bin\\diversion.dll", SteamInstallPath);
+-    sprintf_s(LuaDir,          kRuntimePathCapacity, "%s\\config\\stplug-in",  SteamInstallPath);
+-    sprintf_s(ConfigPath,      kRuntimePathCapacity, "%s\\opensteamtool.toml", SteamInstallPath);
+-    
+-    client_hModule = OSTPlatform::DynamicLibrary::Load(SteamclientPath);
+-    if (!client_hModule) {
+-        LOG_ERROR("Load steamclient64.dll failed: {} (err={})",
+-                  SteamclientPath, OSTPlatform::DynamicLibrary::GetLastErrorCode());
+-        return false;
+-    }
+-    LOG_INFO("Loaded steamclient64.dll from {}", SteamclientPath);
+-    
+-    ui_hModule = OSTPlatform::DynamicLibrary::Load(SteamUIPath);
+-    if(!ui_hModule) {
+-        LOG_ERROR("Load failed for steamui.dll: err={}", OSTPlatform::DynamicLibrary::GetLastErrorCode());
+-        return false;
+-    }
+-    return true;
+-}
+-
+-// All initialisation that touches the filesystem, loads modules, scans
+-// memory, or installs detours runs here on a worker thread — we MUST NOT do
+-// any of that from inside DllMain (loader lock).
+-static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule) {
+-    NestGStartup::Write("runtime.init.begin");
+-    Log::Init(selfModule);
+-    LOG_INFO("OpenSteamTool init thread started");
+-
+-    if (!InitializeSteamComponents(selfModule)) {
+-        NestGStartup::Write("runtime.modules.failed", GetLastError());
+-        LOG_ERROR("InitializeSteamComponents failed");
+-        return 1;
+-    }
+-
+-    NestGStartup::Write("runtime.config.begin");
+-    Config::Load(ConfigPath);
+-    Log::InitModules();
+-    Log::InstallPlatformLogSink();
+-    SteamDiagnostics::Initialize(SteamclientPath, SteamUIPath);
+-
+-    // Load pattern files for steamclient64.dll and steamui.dll.
+-    // Each call computes the SHA-256 of the DLL on disk, checks the local
+-    // cache, and downloads from GitHub if needed.  Both calls are synchronous
+-    // but run on this worker thread, never under the loader lock.
+-    NestGStartup::Write("runtime.patterns.begin");
+-    PatternLoader::Load(ui_hModule, SteamUIPath, "steamui");
+-    PatternLoader::Load(client_hModule, SteamclientPath, "steamclient");
+-
+-    // IPC method metadata (funcHash, fencepost, argc, ...)
+-    NestGStartup::Write("runtime.ipc.begin");
+-    IPCLoader::Load(SteamclientPath);
+-
+-    NestGStartup::Write("runtime.lua.begin");
+-    std::vector<std::string> watchDirs =
+-        LuaConfig::MergeWatchDirs(Config::GetLuaPaths(), std::string(LuaDir));
+-    for (const auto& dir : watchDirs)
+-        LuaConfig::ParseDirectory(dir);
+-
+-    LuaFileWatcher::Start(watchDirs);
+-    ConfigFileWatcher::Start(ConfigPath, LuaDir);
+-
+-    NestGStartup::Write("runtime.hooks.ui.begin");
+-    SteamUI::CoreHook();
+-    NestGStartup::Write("runtime.hooks.client.begin");
+-    SteamClient::CoreHook();
+-
+-    // Surface any functions that FindPattern() could not locate.
+-    PatternLoader::ReportMissingFunctions();
+-
+-    // Optional Steam Cloud save redirection (CloudRedirect). No-op unless
+-    // [cloud].enabled is set and cloud_redirect.dll is present.
+-    NestGStartup::Write("runtime.cloud.begin");
+-    CloudRedirectHost::Initialize(SteamInstallPath);
+-
+-    // Contributes manifest request codes for depots this account owns, on
+-    // request. Started after the hooks are in place because it needs the
+-    // netpacket send path; it idles until the license list resolves anyway.
+-    ManifestDonor::Start();
+-
+-    // Register the bst:// URI scheme so the website can drive code redemption via this
+-    // DLL (rundll32 handler). HKCU, no admin; idempotent.
+-    // NestG owns activation; do not register an external redemption protocol.
+-
+-    // Optional self-update check. Runs on its own detached thread so the network
+-    // round-trip never delays hook installation; a staged DLL applies next launch.
+-    //
+-    // Compiled out entirely by -DOST_ENABLE_UPDATER=OFF. That is deliberately a
+-    // build-time cut rather than a runtime one: a pinned or private build should
+-    // not be replaceable by flipping [update] in opensteamtool.toml, and with the
+-    // updater absent the DLL makes no update request at all.
+-#ifdef OST_ENABLE_UPDATER
+-    if (Config::GetUpdateEnabled()) {
+-        OSTPlatform::Thread::StartDetached([] () -> uint32_t {
+-            const std::string self = std::string(SteamInstallPath) + "\\OpenSteamTool.dll";
+-            AppUpdater::CleanupStagedBackup(self);
+-
+-            const AppUpdater::CheckResult upd = AppUpdater::Check();
+-            if (!upd.updateAvailable) return 0;
+-            if (!AppUpdater::DownloadAndStage(upd, self)) return 0;
+-
+-            const bool restart = OSTPlatform::Dialog::ShowConfirm(
+-                "BetterSteamTools Updated!",
+-                upd.oldVersion + " -> " + upd.newVersion +
+-                "\n\nRestart Steam now to apply?");
+-            if (restart) AppUpdater::RestartSteam();
+-            return 0;
+-        });
+-    }
+-#else
+-    LOG_INFO("Self-updater not compiled in (OST_ENABLE_UPDATER=OFF)");
+-#endif
+-
+-    NestGStartup::Write("runtime.init.complete");
+-    LOG_INFO("OpenSteamTool init complete");
+-    return 0;
+-}
+-
+-static HMODULE g_self = nullptr;
+-static INIT_ONCE g_initialize = INIT_ONCE_STATIC_INIT;
+-static BOOL CALLBACK InitializeOnce(PINIT_ONCE, PVOID, PVOID*) {
+-    try {
+-        InitThread(reinterpret_cast<OSTPlatform::DynamicLibrary::ModuleHandle>(g_self));
+-    } catch (const std::exception&) {
+-        // Do not log exception text, which can contain paths or configuration.
+-        NestGStartup::Write("runtime.exception", ERROR_UNHANDLED_EXCEPTION);
+-    } catch (...) {
+-        NestGStartup::Write("runtime.exception.unknown", ERROR_UNHANDLED_EXCEPTION);
+-    }
+-    return TRUE; // A failed/partial initialization must never be repeated in-process.
+-}
+-
+-extern "C" __declspec(dllexport) void WINAPI NestGInitialize() {
+-    // Called on a proxy worker after the OS loader lock has been released.
+-    wchar_t executable[32768];
+-    DWORD length = GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable));
+-    if (!length || length >= ARRAYSIZE(executable)) return;
+-    const wchar_t* name = wcsrchr(executable, L'\\');
+-    if (!name || _wcsicmp(name + 1, L"steam.exe") != 0) return;
+-    HMODULE pinned;
+-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+-            reinterpret_cast<LPCWSTR>(g_self), &pinned)) return;
+-    InitOnceExecuteOnce(&g_initialize, InitializeOnce, nullptr, nullptr);
+-}
+-
+-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, PVOID) {
+-    if (reason == DLL_PROCESS_ATTACH) g_self = module;
+-    // Process-lifetime runtime: never join watchers or call cloud shutdown while
+-    // Windows holds the loader lock and has already terminated other threads.
+-    return TRUE;
+-}
+\ No newline at end of file
++#include "dllmain.h"
++#include "NestG/StartupDiagnostics.h"
++#include "NestG/RentalRuntime.h"
++#include "OSTPlatform/include/Encoding.h"
++#include "Hook/HookManager.h"
++#include "Utils/Config/Config.h"
++#include "Utils/Config/ConfigFileWatcher.h"
++#include "Utils/Config/LuaFileWatcher.h"
++#include "Utils/CloudRedirect/CloudRedirectHost.h"
++#include "Utils/SteamMetadata/IPCLoader.h"
++#include "Utils/SteamMetadata/ManifestDonor.h"
++#include "Utils/SteamMetadata/PatternLoader.h"
++#include "Utils/SteamMetadata/SteamDiagnostics.h"
++#ifdef OST_ENABLE_UPDATER
++#include "Utils/Update/AppUpdater.h"
++#endif
++#include "OSTPlatform/include/Dialog.h"
++#include "OSTPlatform/include/DynamicLibrary.h"
++#include "OSTPlatform/include/Thread.h"
++
++#include <string>
++#include <windows.h>
++
++// prepare key runtime paths.
++bool InitializeSteamComponents(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
++{
++    const std::string steamInstallPath = OSTPlatform::Encoding::WideToUtf8(OSTPlatform::DynamicLibrary::GetModuleDirectory(selfModule).wstring());
++    if (steamInstallPath.empty()) {
++        return false;
++    }
++    sprintf_s(SteamInstallPath, kRuntimePathCapacity, "%s", steamInstallPath.c_str());
++    sprintf_s(SteamclientPath, kRuntimePathCapacity, "%s\\steamclient64.dll",  SteamInstallPath);
++    sprintf_s(SteamUIPath,     kRuntimePathCapacity, "%s\\steamui.dll",        SteamInstallPath);
++    sprintf_s(DiversionPath,   kRuntimePathCapacity, "%s\\bin\\diversion.dll", SteamInstallPath);
++    sprintf_s(LuaDir,          kRuntimePathCapacity, "%s\\config\\stplug-in",  SteamInstallPath);
++    sprintf_s(ConfigPath,      kRuntimePathCapacity, "%s\\opensteamtool.toml", SteamInstallPath);
++    
++    client_hModule = OSTPlatform::DynamicLibrary::Load(SteamclientPath);
++    if (!client_hModule) {
++        LOG_ERROR("Load steamclient64.dll failed: {} (err={})",
++                  SteamclientPath, OSTPlatform::DynamicLibrary::GetLastErrorCode());
++        return false;
++    }
++    LOG_INFO("Loaded steamclient64.dll from {}", SteamclientPath);
++    
++    ui_hModule = OSTPlatform::DynamicLibrary::Load(SteamUIPath);
++    if(!ui_hModule) {
++        LOG_ERROR("Load failed for steamui.dll: err={}", OSTPlatform::DynamicLibrary::GetLastErrorCode());
++        return false;
++    }
++    return true;
++}
++
++// All initialisation that touches the filesystem, loads modules, scans
++// memory, or installs detours runs here on a worker thread — we MUST NOT do
++// any of that from inside DllMain (loader lock).
++static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule) {
++    NestGStartup::Write("runtime.init.begin");
++    Log::Init(selfModule);
++    LOG_INFO("OpenSteamTool init thread started");
++
++    if (!InitializeSteamComponents(selfModule)) {
++        NestGStartup::Write("runtime.modules.failed", GetLastError());
++        LOG_ERROR("InitializeSteamComponents failed");
++        return 1;
++    }
++
++    NestGStartup::Write("runtime.config.begin");
++    Config::Load(ConfigPath);
++    Log::InitModules();
++    Log::InstallPlatformLogSink();
++    SteamDiagnostics::Initialize(SteamclientPath, SteamUIPath);
++
++    // Load pattern files for steamclient64.dll and steamui.dll.
++    // Each call computes the SHA-256 of the DLL on disk, checks the local
++    // cache, and downloads from GitHub if needed.  Both calls are synchronous
++    // but run on this worker thread, never under the loader lock.
++    NestGStartup::Write("runtime.patterns.begin");
++    PatternLoader::Load(ui_hModule, SteamUIPath, "steamui");
++    PatternLoader::Load(client_hModule, SteamclientPath, "steamclient");
++
++    // IPC method metadata (funcHash, fencepost, argc, ...)
++    NestGStartup::Write("runtime.ipc.begin");
++    IPCLoader::Load(SteamclientPath);
++
++    // Install the reserved-source filesystem boundary before the unrestricted
++    // retail Lua VM can execute dofile/loadfile. The monitor stays closed until
++    // the verified identity and manifest hooks are actually installed.
++    if (!NestGRental::Start(OSTPlatform::Encoding::Utf8ToWide(SteamInstallPath))) {
++        NestGStartup::Write("runtime.rental_boundary.failed");
++        return 0;
++    }
++
++    NestGStartup::Write("runtime.lua.begin");
++    std::vector<std::string> watchDirs =
++        LuaConfig::MergeWatchDirs(Config::GetLuaPaths(), std::string(LuaDir));
++    for (const auto& dir : watchDirs)
++        LuaConfig::ParseDirectory(dir);
++
++    LuaFileWatcher::Start(watchDirs);
++    ConfigFileWatcher::Start(ConfigPath, LuaDir);
++
++    NestGStartup::Write("runtime.hooks.ui.begin");
++    SteamUI::CoreHook();
++    NestGStartup::Write("runtime.hooks.client.begin");
++    SteamClient::CoreHook();
++
++    // Surface any functions that FindPattern() could not locate.
++    PatternLoader::ReportMissingFunctions();
++
++    // Optional Steam Cloud save redirection (CloudRedirect). No-op unless
++    // [cloud].enabled is set and cloud_redirect.dll is present.
++    NestGStartup::Write("runtime.cloud.begin");
++    CloudRedirectHost::Initialize(SteamInstallPath);
++
++    // Contributes manifest request codes for depots this account owns, on
++    // request. Started after the hooks are in place because it needs the
++    // netpacket send path; it idles until the license list resolves anyway.
++    ManifestDonor::Start();
++
++    // Register the bst:// URI scheme so the website can drive code redemption via this
++    // DLL (rundll32 handler). HKCU, no admin; idempotent.
++    // NestG owns activation; do not register an external redemption protocol.
++
++    // Optional self-update check. Runs on its own detached thread so the network
++    // round-trip never delays hook installation; a staged DLL applies next launch.
++    //
++    // Compiled out entirely by -DOST_ENABLE_UPDATER=OFF. That is deliberately a
++    // build-time cut rather than a runtime one: a pinned or private build should
++    // not be replaceable by flipping [update] in opensteamtool.toml, and with the
++    // updater absent the DLL makes no update request at all.
++#ifdef OST_ENABLE_UPDATER
++    if (Config::GetUpdateEnabled()) {
++        OSTPlatform::Thread::StartDetached([] () -> uint32_t {
++            const std::string self = std::string(SteamInstallPath) + "\\OpenSteamTool.dll";
++            AppUpdater::CleanupStagedBackup(self);
++
++            const AppUpdater::CheckResult upd = AppUpdater::Check();
++            if (!upd.updateAvailable) return 0;
++            if (!AppUpdater::DownloadAndStage(upd, self)) return 0;
++
++            const bool restart = OSTPlatform::Dialog::ShowConfirm(
++                "BetterSteamTools Updated!",
++                upd.oldVersion + " -> " + upd.newVersion +
++                "\n\nRestart Steam now to apply?");
++            if (restart) AppUpdater::RestartSteam();
++            return 0;
++        });
++    }
++#else
++    LOG_INFO("Self-updater not compiled in (OST_ENABLE_UPDATER=OFF)");
++#endif
++
++    NestGStartup::Write("runtime.init.complete");
++    LOG_INFO("OpenSteamTool init complete");
++    return 0;
++}
++
++static HMODULE g_self = nullptr;
++static INIT_ONCE g_initialize = INIT_ONCE_STATIC_INIT;
++static BOOL CALLBACK InitializeOnce(PINIT_ONCE, PVOID, PVOID*) {
++    try {
++        InitThread(reinterpret_cast<OSTPlatform::DynamicLibrary::ModuleHandle>(g_self));
++    } catch (const std::exception&) {
++        // Do not log exception text, which can contain paths or configuration.
++        NestGStartup::Write("runtime.exception", ERROR_UNHANDLED_EXCEPTION);
++    } catch (...) {
++        NestGStartup::Write("runtime.exception.unknown", ERROR_UNHANDLED_EXCEPTION);
++    }
++    return TRUE; // A failed/partial initialization must never be repeated in-process.
++}
++
++extern "C" __declspec(dllexport) void WINAPI NestGInitialize() {
++    // Called on a proxy worker after the OS loader lock has been released.
++    wchar_t executable[32768];
++    DWORD length = GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable));
++    if (!length || length >= ARRAYSIZE(executable)) return;
++    const wchar_t* name = wcsrchr(executable, L'\\');
++    if (!name || _wcsicmp(name + 1, L"steam.exe") != 0) return;
++    HMODULE pinned;
++    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
++            reinterpret_cast<LPCWSTR>(g_self), &pinned)) return;
++    InitOnceExecuteOnce(&g_initialize, InitializeOnce, nullptr, nullptr);
++}
++
++BOOL APIENTRY DllMain(HMODULE module, DWORD reason, PVOID) {
++    if (reason == DLL_PROCESS_ATTACH) g_self = module;
++    // Process-lifetime runtime: never join watchers or call cloud shutdown while
++    // Windows holds the loader lock and has already terminated other threads.
++    return TRUE;
++}
+diff --git a/src/proto/steam_messages.proto b/src/proto/steam_messages.proto
+index fd9a1f8..505b54e 100644
+--- a/src/proto/steam_messages.proto
++++ b/src/proto/steam_messages.proto
+@@ -3,6 +3,13 @@
+ 
+ syntax = "proto2";
+ 
++// Only the successful server response is needed by the rental identity gate.
++// Unknown response fields remain ignored by callers. Outbound login bodies can
++// contain passwords/tokens and are deliberately never parsed by this feature.
++message NestGRentalLogonResponse {
++	optional int32 eresult = 1 [default = 2];
++}
++
+ // ============================================================
+ // CMsgProtoBufHeader
+ // ============================================================
+@@ -517,4 +524,4 @@ enum EDisplayStatus {
+     k_EDisplayStatusOwnerLocked = 37;
+     k_EDisplayStatusDownloadFailed = 38;
+     k_EDisplayStatusUpdateFailed = 39;
+-}
+\ No newline at end of file
++}
