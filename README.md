@@ -13,7 +13,7 @@ Tài liệu được phân tách rõ ràng thành 2 phần:
 # Báo Cáo Phân Tích Ngược (Reverse Engineering) & Các Hành Vi Trái Phép Của DCGamingLauncher
 
 > **Đối tượng phân tích:** `DCGamingLauncher` (`DC-Launcher.exe` v1.0.29 / Runtime Bundle `bettersteamtools-cloud` v1.0.19)  
-> **Đường dẫn cài đặt:** `C:\Users\baoba\AppData\Local\Programs\DCGamingLauncher`  
+> **Đường dẫn cài đặt:** `C:\Users\<user>\AppData\Local\Programs\DCGamingLauncher`  
 > **Nền tảng:** .NET 8.0 Single-File Executable (Avalonia UI) + Go Helper (`DCGaming.SteamDpi.Helper.exe`) + Native C++ x64 Payload DLLs
 
 ---
@@ -133,7 +133,7 @@ Trong `DC-Runtime.Core.dll` (`DCGaming.Runtime.Core.RuntimeUpdaterTaskRegistrati
 - **Action:** Chạy ngầm `%LOCALAPPDATA%\DCGamingLauncher\RuntimeUpdates\Helper\DCGaming.RuntimeUpdater.exe`.
 
 #### Tầng 2: Registry Run Key (`LauncherAutoStartService`)
-- Ghi khóa khởi động cùng Windows tại `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` với tên giá trị `DCGamingLauncher` trỏ về `"C:\Users\baoba\AppData\Local\Programs\DCGamingLauncher\DC-Launcher.exe" --autostart`.
+- Ghi khóa khởi động cùng Windows tại `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` với tên giá trị `DCGamingLauncher` trỏ về `"C:\Users\<user>\AppData\Local\Programs\DCGamingLauncher\DC-Launcher.exe" --autostart`.
 
 #### Tầng 3: Kích hoạt ngầm từ bên trong `steam.exe` (`RuntimeUpdateBootstrap.h`)
 - Ngay cả khi người dùng xóa Scheduled Task và tắt Autostart của Launcher, mỗi khi người dùng mở Steam (`steam.exe`), tệp `dwmapi.dll` (hoặc `xinput1_4.dll`) nằm trong thư mục Steam sẽ tự động kiểm tra và gọi `CreateProcessW` với cờ `CREATE_NO_WINDOW | DETACHED_PROCESS` để thực thi:
