@@ -2,6 +2,29 @@
 
 > **Mục đích tài liệu**: Báo cáo này tổng hợp toàn bộ bằng chứng kỹ thuật và phân tích chuyên sâu thu được từ quá trình dịch ngược (reverse engineering) bộ cài **DCGamingLauncher** (`DC-Launcher.exe` v1.0.29 / Runtime Bundle `bettersteamtools-cloud` v1.0.19). Tài liệu bao gồm phân tích cả 2 phần: hành vi của Launcher và bóc tách toàn bộ mã nguồn của bộ 04 DLL tiêm vào Steam. Mọi nhận định đều đính kèm **file nhị phân gốc, bảng mã máy và link trực tiếp đến từng dòng code cụ thể** ngay trong repository này để làm bằng chứng kỹ thuật.
 
+
+---
+
+## 📑 MỤC LỤC CHI TIẾT
+
+- [🤡 RẠP XIẾC BẢO MẬT: Dev Tự Dâng Source Code, Frontend & PDB](#-rạp-xiếc-bảo-mật-khi-developer-tự-dâng-full-mã-nguồn-c-frontend-không-che-và-pdb-private-cho-thiên-hạ)
+- [BẢNG CHỈ MỤC NHANH CÁC BẰNG CHỨNG TRONG REPO](#bảng-chỉ-mục-nhanh-các-bằng-chứng--file-đối-chiếu-trong-repo)
+- [PHẦN 1: BẰNG CHỨNG HÀNH VI LAUNCHER](#chi-tiết-từng-bằng-chứng-kỹ-thuật)
+  - [Bằng chứng 1: Cơ chế ACTIVE Game & Đánh cắp Depot](#bằng-chứng-1-cơ-chế-active-game--thương-mại-hóa-bẻ-khóa-steam-và-đánh-cắp-depot)
+  - [Bằng chứng 2: Tấn công DLL Hijacking vào Steam](#bằng-chứng-2-tấn-công-dll-search-order-hijacking-chiếm-quyền-steamexe)
+  - [Bằng chứng 3: Cài cắm mã chạy ngầm (Persistence) 3 tầng](#bằng-chứng-3-cài-đặt-cơ-chế-chạy-ngầm-persistence-đa-tầng--kích-hoạt-tiến-trình-ẩn-từ-bên-trong-steamexe)
+  - [Bằng chứng 4: Can thiệp Kernel WinDivert & Sửa DNS NRPT](#bằng-chứng-4-can-thiệp-mạng-mức-kernel-windivert64sys--sửa-đổi-chính-sách-dns-hệ-thống)
+  - [Bằng chứng 5: Giả mạo bản quyền, Denuvo & Spacewar Online-Fix](#bằng-chứng-5-giả-mạo-bản-quyền-game-phá-khóa-denuvo--spacewar-online-fix)
+  - [Bằng chứng 6: Xâm phạm tài khoản Steam thật (ManifestDonor)](#bằng-chứng-6-xâm-phạm-tài-khoản-steam-thật-của-người-dùng-manifestdonor)
+  - [Bằng chứng 7: Chặn bắt Steam Cloud & Phá khóa Family View](#bằng-chứng-7-chặn-bắt-steam-cloud--phá-khóa-kiểm-soát-phụ-huynh-steam-family-view)
+- [PHẦN 2: DỊCH NGƯỢC CHI TIẾT BỘ 04 TỆP DLL TIÊM VÀO STEAM](#phần-2-dịch-ngược-chi-tiết-bộ-04-tệp-dll-tiêm-vào-steam)
+  - [1. Danh Mục Chi Tiết 04 Tệp DLL](#1-danh-mục-chi-tiết-các-tệp-dll-được-cài-đặt-vào-steam)
+  - [2. Kiến Trúc Nạp Chuỗi (Multi-Stage Chain-Loading)](#2-kiến-trúc-nạp-chuỗi-multi-stage-chain-loading-architecture)
+  - [3. Phân Tích Stage 1: dwmapi.dll & xinput1_4.dll (Loaders)](#3-phân-tích-ngược-stage-1-dwmapidll--xinput1_4dll-proxy-loaders--gatekeepers)
+  - [4. Phân Tích Stage 2: OpenSteamTool.dll (Core Engine)](#4-phân-tích-ngược-stage-2-opensteamtooldll-core-memory-patcher--drm-bypass-engine)
+  - [5. Phân Tích Stage 3: cloud_redirect.dll (Cloud & Parental)](#5-phân-tích-ngược-stage-3-cloud_redirectdll-cloud-save-hijacker--parental-control-bypass)
+  - [6. Kết Luận Kỹ Thuật](#6-kết-luận-kỹ-thuật)
+
 ---
 
 ## 🤡 RẠP XIẾC BẢO MẬT: KHI DEVELOPER TỰ DÂNG FULL MÃ NGUỒN C++, FRONTEND KHÔNG CHE VÀ PDB PRIVATE CHO THIÊN HẠ
@@ -141,7 +164,6 @@ if (CreateProcessW(helper.c_str(), command.data(), nullptr, nullptr, FALSE, CREA
 Trích đoạn can thiệp Windows Name Resolution Policy Table trong [`source/steamdpi_helper_go/steam-dpi-helper/internal/steamdns/policy_windows.go` (dòng 45–52)](source/steamdpi_helper_go/steam-dpi-helper/internal/steamdns/policy_windows.go#L45-L52):
 
 ```powershell
-# ÉP TOÀN BỘ PHÂN GIẢI DNS CÁC DOMAIN STEAM PHẢI ĐI QUA PROXY NỘI BỘ
 $r = Add-DnsClientNrptRule -Namespace @($p.namespaces) -NameServers '127.0.0.1' -DisplayName 'DCGaming Steam DNS v2' -Comment ('DCGamingSteamDns:'+ $p.tag) -PassThru -ErrorAction Stop
 ```
 
@@ -226,7 +248,7 @@ memset(site, 0x90, 5);
 
 ---
 
-# Báo Cáo Phân Tích Ngược (Reverse Engineering) Bộ 04 Tệp DLL Tiêm Vào Steam
+# PHẦN 2: DỊCH NGƯỢC CHI TIẾT BỘ 04 TỆP DLL TIÊM VÀO STEAM
 
 > **Đối tượng phân tích:** Bộ 04 tệp DLL native x64 trong gói runtime `bettersteamtools-cloud` v1.0.19 (`dwmapi.dll`, `xinput1_4.dll`, `OpenSteamTool.dll`, `cloud_redirect.dll`) được `DCGamingLauncher` cài đặt trực tiếp vào thư mục gốc của Steam (`<SteamRoot>`).  
 > **Nguồn dữ liệu đối chiếu:** Tệp nhị phân PE64 kết hợp toàn bộ mã nguồn C++ gốc bị rò rỉ trong kho lưu trữ cục bộ (`%LOCALAPPDATA%\DCGaming\Launcher\RuntimeCache\...\14CA515759554562BEA1F01D5B2943AD5C2F1EFC0DA78AA2F6A2E9C7F17AF94E\payload.bin` — tức `BetterSteamTools-DCGaming-source.zip` và `CloudRedirect-source.zip`).
@@ -281,7 +303,7 @@ flowchart TD
 
 ## 3. Phân Tích Ngược Stage 1: `dwmapi.dll` & `xinput1_4.dll` (Proxy Loaders & Gatekeepers)
 
-Mã nguồn nằm tại `[src/dwmapi/dwmapi.cpp](source/injected_dlls_cpp/src/dwmapi/dwmapi.cpp)`, `[src/dwmapi/thunks.asm](source/injected_dlls_cpp/src/dwmapi/thunks.asm)`, `[src/xinput1_4/xinput1_4.cpp](source/injected_dlls_cpp/src/xinput1_4/xinput1_4.cpp)`, `[src/NestG/ProxyBootstrap.h](source/injected_dlls_cpp/src/NestG/ProxyBootstrap.h)` và `[src/NestG/RuntimeUpdateBootstrap.h](source/injected_dlls_cpp/src/NestG/RuntimeUpdateBootstrap.h)`.
+Mã nguồn nằm tại [`src/dwmapi/dwmapi.cpp`](source/injected_dlls_cpp/src/dwmapi/dwmapi.cpp), [`src/dwmapi/thunks.asm`](source/injected_dlls_cpp/src/dwmapi/thunks.asm), [`src/xinput1_4/xinput1_4.cpp`](source/injected_dlls_cpp/src/xinput1_4/xinput1_4.cpp), [`src/NestG/ProxyBootstrap.h`](source/injected_dlls_cpp/src/NestG/ProxyBootstrap.h) và [`src/NestG/RuntimeUpdateBootstrap.h`](source/injected_dlls_cpp/src/NestG/RuntimeUpdateBootstrap.h).
 
 ### 3.1. Kỹ thuật Proxy Forwarding và Ghim Bộ Nhớ (Memory Pinning)
 1. **Kiểm tra tên tiến trình chủ (`IsSteamProcess`):**
@@ -312,11 +334,11 @@ Trong luồng khởi tạo `NestGProxy::Initialize`:
 
 ## 4. Phân Tích Ngược Stage 2: `OpenSteamTool.dll` (Core Memory Patcher & DRM Bypass Engine)
 
-`OpenSteamTool.dll` là trái tim của hệ thống can thiệp Steam. Khi `NestGInitialize()` (trong `[src/dllmain.cpp](source/injected_dlls_cpp/src/dllmain.cpp)`) được gọi, nó khởi chạy luồng `MainThread`, đợi `steamclient64.dll` và `steamui.dll` được nạp vào không gian địa chỉ của `steam.exe`, sau đó dùng `PatternLoader` quét các mẫu byte (AOB signatures) từ tệp `.toml` và cài đặt hàng loạt điểm chặn (Hooks) bằng **Microsoft Detours** kết hợp **Vectored Exception Handling (VEH Hardware/Software `INT3` Traps)**.
+`OpenSteamTool.dll` là trái tim của hệ thống can thiệp Steam. Khi `NestGInitialize()` (trong [`src/dllmain.cpp`](source/injected_dlls_cpp/src/dllmain.cpp)) được gọi, nó khởi chạy luồng `MainThread`, đợi `steamclient64.dll` và `steamui.dll` được nạp vào không gian địa chỉ của `steam.exe`, sau đó dùng `PatternLoader` quét các mẫu byte (AOB signatures) từ tệp `.toml` và cài đặt hàng loạt điểm chặn (Hooks) bằng **Microsoft Detours** kết hợp **Vectored Exception Handling (VEH Hardware/Software `INT3` Traps)**.
 
 Dưới đây là phân tích chi tiết **10 nhóm hành vi can thiệp cốt lõi** trong `OpenSteamTool.dll`:
 
-### 4.1. Giả Mạo Bản Quyền & Quyền Sở Hữu Game (`[src/Hook/Hooks_Package.cpp](source/injected_dlls_cpp/src/Hook/Hooks_Package.cpp)`)
+### 4.1. Giả Mạo Bản Quyền & Quyền Sở Hữu Game (`src/Hook/Hooks_Package.cpp`)
 - **Hàm bị Hook:**
   - `CheckAppOwnership` (Detour vào hàm kiểm tra quyền sở hữu AppID của `steamclient64.dll`).
   - `GetPackageInfo` (Can thiệp bằng bẫy ngoại lệ **VEH `INT3`** tại địa chỉ trả về của hàm truy vấn gói thuê bao trong `steamclient64.dll`).
@@ -330,53 +352,53 @@ Dưới đây là phân tích chi tiết **10 nhóm hành vi can thiệp cốt l
      - Ghi đè `accessToken = 10660652434190618804ULL`, đặt `status = 0` (Available), `license_type = 1` (Single Purchase) để đánh lừa toàn bộ hệ thống phân phối nội dung của Steam rằng tài khoản này đã mua tất cả các game và DLC đó.
   3. Đối với các App bị khóa vùng hoặc chưa phát hành: Tự động ghi đè trường `common.ReleaseState = "released"` trong `AppInfo` để mở khóa nút Install/Play.
 
-### 4.2. Tiêm Khóa Giải Mã Depot AES-256 (`[src/Hook/Hooks_Decryption.cpp](source/injected_dlls_cpp/src/Hook/Hooks_Decryption.cpp)`)
+### 4.2. Tiêm Khóa Giải Mã Depot AES-256 (`src/Hook/Hooks_Decryption.cpp`)
 - **Hàm bị Hook:** `ConfigStoreGetBinary` (Hàm đọc cấu hình nhị phân nội bộ của Steam).
 - **Cơ chế hoạt động:**
   - Khi Steam chuẩn bị tải hoặc giải mã các chunk dữ liệu của một Depot từ máy chủ CDN của Valve, nó gọi `ConfigStoreGetBinary` để tìm khóa tại đường dẫn cấu hình `<DepotId>\DecryptionKey`.
   - Nếu tài khoản không mua game, máy chủ Valve sẽ không cấp khóa này. Tuy nhiên, `Hooked_ConfigStoreGetBinary` sẽ chặn lời gọi này, tra cứu mã hex 64 ký tự (32 bytes) được khai báo trong lệnh `addappid(depotId, 1, "<key>")` của tệp `.lua` (hoặc trong gói `NestGRental`), chuyển đổi sang mảng 32 byte nhị phân thông qua `CUtlBuffer::Put` và trả về `true`.
   - Nhờ đó, `steam.exe` có thể tải và giải mã trực tiếp toàn bộ dữ liệu game gốc từ máy chủ CDN của Valve mà không cần tài khoản sở hữu game.
 
-### 4.3. Ghi Đè Manifest & Tự Động Tải Manifest Từ Máy Chủ Lậu (`[src/Hook/Hooks_Manifest.cpp](source/injected_dlls_cpp/src/Hook/Hooks_Manifest.cpp)`)
+### 4.3. Ghi Đè Manifest & Tự Động Tải Manifest Từ Máy Chủ Lậu (`src/Hook/Hooks_Manifest.cpp`)
 - **Hàm bị Hook:**
   - `BuildDepotDependency` (`CUserAppManager::BuildDepotDependency`)
   - `YldLoadDepotManifest` (Hàm nạp tệp `.manifest` từ đĩa)
 - **Cơ chế hoạt động:**
   1. Trong `Hooked_BuildDepotDependency`: Duyệt qua vector các Depot của AppID đang cài đặt; nếu tệp `.lua` có chỉ định phiên bản manifest thông qua `setManifestid(depotId, manifestGid, size)`, hook sẽ ghi đè trực tiếp `entry.manifestGid` và `entry.size` trong bộ nhớ.
-  2. Trong `Hooked_YldLoadDepotManifest`: Nếu tệp `<SteamRoot>\depotcache\<depotId>_<manifestGid>.manifest` chưa có trên ổ cứng, DLL sẽ tự động gọi `ManifestFetcher::FetchAndSave` để tải tệp `.manifest` đó từ chuỗi các máy chủ lưu trữ lậu được mã hóa cứng trong `[src/Utils/SteamMetadata/ManifestClient.cpp](source/injected_dlls_cpp/src/Utils/SteamMetadata/ManifestClient.cpp)`:
+  2. Trong `Hooked_YldLoadDepotManifest`: Nếu tệp `<SteamRoot>\depotcache\<depotId>_<manifestGid>.manifest` chưa có trên ổ cứng, DLL sẽ tự động gọi `ManifestFetcher::FetchAndSave` để tải tệp `.manifest` đó từ chuỗi các máy chủ lưu trữ lậu được mã hóa cứng trong [`src/Utils/SteamMetadata/ManifestClient.cpp`](source/injected_dlls_cpp/src/Utils/SteamMetadata/ManifestClient.cpp):
      - `https://manifest.luastools.xyz/DepotManifest/<depotId>_<manifestGid>.manifest`
      - `https://manifest.opensteamtool.com/manifest/<depotId>/<manifestGid>`
      - `http://gmrc.wudrm.com/manifest/<depotId>_<manifestGid>.manifest`
      - `https://manifest.steam.run/...`
 
-### 4.4. Đánh Lừa Bảo Mật Denuvo & Giả Mạo App Ownership Ticket (`[src/Hook/Hooks_IPC_ISteamUser.cpp](source/injected_dlls_cpp/src/Hook/Hooks_IPC_ISteamUser.cpp)` & `[src/Pipe/Features/DenuvoAuth/](source/injected_dlls_cpp/src/Pipe/Features/DenuvoAuth/)`)
+### 4.4. Đánh Lừa Bảo Mật Denuvo & Giả Mạo App Ownership Ticket (`src/Hook/Hooks_IPC_ISteamUser.cpp` & `src/Pipe/Features/DenuvoAuth/`)
 Các tựa game sử dụng DRM **Denuvo Anti-Tamper** yêu cầu `ISteamUser::GetSteamID()`, `GetAppOwnershipTicketExtendedData()` và `GetEncryptedAppTicket()` phải khớp với chữ ký mật mã RSA của một tài khoản thực sự sở hữu game. `OpenSteamTool.dll` vượt qua cơ chế này như sau:
-1. **Quét chữ ký Denuvo trên tệp `.exe` của Game (`[src/Pipe/Features/DenuvoAuth/ProtectionScan.cpp](source/injected_dlls_cpp/src/Pipe/Features/DenuvoAuth/ProtectionScan.cpp)`):**
+1. **Quét chữ ký Denuvo trên tệp `.exe` của Game ([`src/Pipe/Features/DenuvoAuth/ProtectionScan.cpp`](source/injected_dlls_cpp/src/Pipe/Features/DenuvoAuth/ProtectionScan.cpp)):**
    - Quét header PE64 của game tìm các section đặc trưng của Denuvo (`.arch`, `.srdata`, `.xdata`, `.pdata` với kích thước lớn) và các chuỗi `"denuvo"`, `"Denuvo Anti-Tamper"`.
-2. **Hook bảng hàm ảo IPC `ISteamUser` (`[src/Hook/Hooks_IPC_ISteamUser.cpp](source/injected_dlls_cpp/src/Hook/Hooks_IPC_ISteamUser.cpp)`):**
+2. **Hook bảng hàm ảo IPC `ISteamUser` ([`src/Hook/Hooks_IPC_ISteamUser.cpp`](source/injected_dlls_cpp/src/Hook/Hooks_IPC_ISteamUser.cpp)):**
    - Chặn hàm `SerializeFunctionCall` trong giao thức IPC giữa tiến trình Game và `steam.exe`.
    - Khi Game gọi **`ISteamUser::GetSteamID`**: Nếu có vé Denuvo hợp lệ được nạp từ máy chủ (`DenuvoAuth`), hàm trả về **`SteamID64` giả mạo của chủ vé** thay vì `SteamID64` thật của người dùng đang đăng nhập.
    - Khi Game gọi **`GetAppOwnershipTicketExtendedData`**, **`RequestEncryptedAppTicket`** hoặc **`GetEncryptedAppTicket`**: Hàm ghi đè toàn bộ bộ đệm trả về bằng dữ liệu vé (`ticket` và `decryptionKey`) lấy từ máy chủ chung (`EticketClient.cpp`), đồng thời sửa gói tin mạng `EMsg 858` (`k_EMsgClientGetAppOwnershipTicketResponse`) trong `Hooks_NetPacket.cpp`.
 
-### 4.5. Giả Mạo AppID `480` (Spacewar) Để Chơi Online Lậu (`[src/Hook/Hooks_Misc.cpp](source/injected_dlls_cpp/src/Hook/Hooks_Misc.cpp)` & `[src/Hook/Hooks_NetPacket.cpp](source/injected_dlls_cpp/src/Hook/Hooks_NetPacket.cpp)`)
+### 4.5. Giả Mạo AppID `480` (Spacewar) Để Chơi Online Lậu (`src/Hook/Hooks_Misc.cpp` & `src/Hook/Hooks_NetPacket.cpp`)
 - **Cơ chế hoạt động:**
   1. Đặt bẫy **VEH `INT3`** vào hàm `CUser::SpawnProcess` (`OnSpawnProcessHit`).
   2. Khi người dùng khởi chạy một game lậu có cấu hình tham số `-onlinefix` (hoặc sử dụng DLL `OnlineFix64.dll`), hook sẽ **ghi đè `GameID` truyền vào tiến trình con thành `480` (tựa game thử nghiệm miễn phí *Spacewar* của Valve)**. Điều này đánh lừa hệ thống máy chủ Steam cho phép game lậu sử dụng hạ tầng kết nối P2P (`SteamNetworkingSockets` / Steam Lobby) của *Spacewar* để chơi nhiều người (Multiplayer).
   3. Để che giấu việc đang chạy *Spacewar* (AppID 480) trên danh sách bạn bè, `Hooks_NetPacket.cpp` chặn gói tin `CMsgClientRichPresenceUpload` (`EMsg 5511`), xóa trạng thái của AppID 480 và thay thế chuỗi hiển thị trạng thái bạn bè (`game_extra_info` trong `CMsgClientGamesPlayed` `EMsg 742`) thành tên của tựa game thật.
 
-### 4.6. Phá Khóa Giới Hạn Steam Family Sharing (`[src/Hook/Hooks_NetPacket.cpp](source/injected_dlls_cpp/src/Hook/Hooks_NetPacket.cpp)`)
+### 4.6. Phá Khóa Giới Hạn Steam Family Sharing (`src/Hook/Hooks_NetPacket.cpp`)
 Thông thường, khi hai người cùng mở game trên một thư viện Steam Family Sharing, Valve sẽ khóa phiên chơi và buộc người chơi sau phải thoát sau vài phút. `OpenSteamTool.dll` vô hiệu hóa cơ chế này bằng cách can thiệp trực tiếp vào luồng gói tin mạng (`SendNetPacket` & `RecvNetPacket`):
 1. **Chặn thông báo đang chạy ứng dụng (`SendNetPacket` - `EMsg 151`):**
    - Kiểm tra header `target_job_name`. Nếu phát hiện gói tin `FamilyGroupsClient.NotifyRunningApps#1`, DLL **xóa trắng toàn bộ phần thân (payload body) của gói tin** trước khi gửi đi, khiến máy chủ Valve không biết người dùng đang mở game trong thư viện chia sẻ.
 2. **Vô hiệu hóa lệnh cưỡng bức thoát game (`RecvNetPacket` - `EMsg 9406`):**
    - Khi máy chủ Valve gửi gói tin `k_EMsgClientSharedLibraryStopPlaying` (`EMsg 9406`) yêu cầu đóng game vì chủ tài khoản đang chơi, DLL **xóa sạch danh sách `stop_apps` bên trong gói tin** trước khi `steamclient64.dll` kịp xử lý, giúp người dùng tiếp tục chơi mà không bao giờ bị văng ra.
 
-### 4.7. Làm Giả CD Key Cho Các Game Đời Cũ (`[src/Hook/Hooks_NetPacket.cpp](source/injected_dlls_cpp/src/Hook/Hooks_NetPacket.cpp)`)
+### 4.7. Làm Giả CD Key Cho Các Game Đời Cũ (`src/Hook/Hooks_NetPacket.cpp`)
 - Khi game yêu cầu mã CD Key từ Steam thông qua gói tin `k_EMsgClientGetLegacyGameKey` (`EMsg 730`):
   - Nếu game nằm trong danh sách kích hoạt lậu, `Hooked_SendNetPacket` **chặn không cho gửi gói tin lên máy chủ Valve**.
   - Thay vào đó, nó tự tổng hợp một gói tin phản hồi giả `k_EMsgClientGetLegacyGameKeyResponse` (`EMsg 785`) với `EResult = 1 (OK)` và chuỗi khóa giả `"01234-56789-ABCDE-FGHIJ-KLMNO"`, sau đó tiêm ngược vào hàm `Hooked_RecvNetPacket` để đánh lừa Steam và Game.
 
-### 4.8. Tự Động Thu Thập & Gửi Lén Dữ Liệu Tài Khoản Steam Thật Của Người Dùng (`[src/Utils/SteamMetadata/ManifestDonor.cpp](source/injected_dlls_cpp/src/Utils/SteamMetadata/ManifestDonor.cpp)`)
+### 4.8. Tự Động Thu Thập & Gửi Lén Dữ Liệu Tài Khoản Steam Thật Của Người Dùng (`src/Utils/SteamMetadata/ManifestDonor.cpp`)
 Đây là một trong những hành vi xâm phạm quyền riêng tư và bảo mật tài khoản nghiêm trọng nhất của `OpenSteamTool.dll`:
 1. **Quét danh sách toàn bộ bản quyền thật của người dùng (`EMsg 780` - `CMsgClientLicenseList`):**
    - Khi người dùng đăng nhập vào tài khoản Steam cá nhân của họ, `Hooks_NetPacket.cpp` bắt gói tin `k_EMsgClientLicenseList` (`EMsg 780`) để lấy danh sách tất cả các gói bản quyền (`packageId`, `accessToken`) mà tài khoản đó thực sự sở hữu.
@@ -388,7 +410,7 @@ Thông thường, khi hai người cùng mở game trên một thư viện Steam
 3. **Bắt thụ động mọi thao tác tải game hợp pháp:**
    - Ngay cả ngoài danh sách `manifestwanted`, bất kỳ khi nào người dùng tải hoặc cập nhật một game bản quyền trên máy của họ, `Hooks_NetPacket.cpp` đều tự động bắt cặp request/response của `ContentServerDirectory.GetManifestRequestCode#1` và gửi lén mã code đó lên `manifest.luastools.xyz`.
 
-### 4.9. Tiêm DLL Tùy Ý Vào Tiến Trình Game (`[src/Pipe/Features/Injection/Injection.cpp](source/injected_dlls_cpp/src/Pipe/Features/Injection/Injection.cpp)` & `[RemoteProcess.cpp](source/injected_dlls_cpp/src/OSTPlatform/Windows/RemoteProcess.cpp)`)
+### 4.9. Tiêm DLL Tùy Ý Vào Tiến Trình Game (`src/Pipe/Features/Injection/Injection.cpp` & `RemoteProcess.cpp`)
 - Khi Steam khởi chạy bất kỳ tệp `.exe` nào của game (`CreateProcessW`), `OpenSteamTool.dll` kiểm tra cấu hình `[[inject]]` trong `opensteamtool.toml` hoặc yêu cầu qua Named Pipe.
 - Sử dụng kỹ thuật **Classic Remote Thread DLL Injection**:
   - Mở tiến trình game với quyền `PROCESS_ALL_ACCESS`.
@@ -396,7 +418,7 @@ Thông thường, khi hai người cùng mở game trên một thư viện Steam
   - Ghi đường dẫn DLL (ví dụ: các bản crack `steam_api64.dll`, `OnlineFix64.dll`, hoặc plugin gian lận) vào bộ nhớ game qua `WriteProcessMemory`.
   - Gọi `CreateRemoteThread` tại địa chỉ hàm `LoadLibraryW` của `kernel32.dll` để ép tiến trình game nạp DLL đó.
 
-### 4.10. Hook Hệ Thống Tệp Tin Mức Thấp `ntdll.dll` (`[src/NestG/RentalRuntime.cpp](source/injected_dlls_cpp/src/NestG/RentalRuntime.cpp)`)
+### 4.10. Hook Hệ Thống Tệp Tin Mức Thấp `ntdll.dll` (`src/NestG/RentalRuntime.cpp`)
 Để phục vụ tính năng "Thuê game" (`NestGRental`) và ngăn người dùng sao chép các tệp `.manifest` thuê ra ngoài:
 - `RentalRuntime.cpp` cài đặt Detour trực tiếp lên **05 hàm Native API mức thấp nhất của Windows trong `ntdll.dll`**:
   1. `NtCreateFile` (`ReadAdapter`)
@@ -412,7 +434,7 @@ Thông thường, khi hai người cùng mở game trên một thư viện Steam
 
 Mã nguồn của `cloud_redirect.dll` nằm trong gói `dcgaming-cloudredirect\CloudRedirect-source.zip` (phiên bản **CloudRedirect v2.6.6**). DLL này được `OpenSteamTool.dll` nạp vào `steam.exe` thông qua `CloudRedirectHost::Initialize` (gọi hàm export `CR_InitCloudSave`) hoặc thông qua cơ chế tự vá code-cave vào `steamclient64.dll`.
 
-### 5.1. Danh Sách Các Hàm Export Của `cloud_redirect.dll` (`[src/platform/win/cr_api.cpp](source/injected_dlls_cpp/dcgaming-cloudredirect/cr_src/src/platform/win/cr_api.cpp)`)
+### 5.1. Danh Sách Các Hàm Export Của `cloud_redirect.dll` (`src/platform/win/cr_api.cpp`)
 `cloud_redirect.dll` xuất (export) **12 hàm API C** để giao tiếp trực tiếp với `OpenSteamTool.dll`:
 - `CR_InitCloudSave(const char* steamPath, CR_NotifyFn notify)`
 - `CR_HandleCloudRpc(const char* method, uint32_t appId, uint32_t accountId, ...)`
@@ -423,7 +445,7 @@ Mã nguồn của `cloud_redirect.dll` nằm trong gói `dcgaming-cloudredirect\
 - `CR_ResolveStatsHooks(...)`
 - `CR_HandleStatsWrite(...)` / `CR_HandleStatsReload(...)`
 
-### 5.2. Chặn Bắt Giao Thức Steam Cloud & Chuyển Hướng Lưu Trữ (`[src/platform/win/cloud_intercept.cpp](source/injected_dlls_cpp/dcgaming-cloudredirect/cr_src/src/platform/win/cloud_intercept.cpp)`)
+### 5.2. Chặn Bắt Giao Thức Steam Cloud & Chuyển Hướng Lưu Trữ (`src/platform/win/cloud_intercept.cpp`)
 Vì các game kích hoạt lậu không có bản quyền trên máy chủ Valve, nếu `steam.exe` gửi yêu cầu đồng bộ Cloud Save lên Valve, máy chủ sẽ từ chối (`Access Denied`) và ghi nhận hành vi bất thường. `cloud_redirect.dll` giải quyết bằng cách:
 
 1. **Hook Bảng Hàm Ảo (VTable Hooking) & Inline Detour trên `steamclient64.dll`:**
@@ -447,7 +469,7 @@ Vì các game kích hoạt lậu không có bản quyền trên máy chủ Valve
 4. **Giả Lập Thành Tựu (Achievements) & Thời Gian Chơi (`stats_handlers.cpp`):**
    - Chặn các gói tin `Player.GetLastPlayedTimes#1`, `Player.ClientGetPerAppPlaytime#1` và `CMsgClientStoreUserStats2` (`EMsg 5466`) để tự lưu trữ thành tựu và số giờ chơi của game lậu vào cơ sở dữ liệu cục bộ, sau đó tiêm ngược vào giao diện Steam Library.
 
-### 5.3. Vá Nhị Phân Vượt Khóa Kiểm Soát Phụ Huynh & Giới Hạn Giờ Chơi (`[src/common/parental_bypass.cpp](source/injected_dlls_cpp/dcgaming-cloudredirect/cr_src/src/common/parental_bypass.cpp)`)
+### 5.3. Vá Nhị Phân Vượt Khóa Kiểm Soát Phụ Huynh & Giới Hạn Giờ Chơi (`src/common/parental_bypass.cpp`)
 Khi người dùng thuê tài khoản hoặc dùng chung tài khoản có bật **Steam Family View (Parental Controls)** hoặc bị giới hạn khung giờ chơi trong ngày (**Playtime Restrictions**), `cloud_redirect.dll` (và bản sao logic tương tự trong `OpenSteamTool.dll` tại `Hooks_Misc.cpp`) sẽ **sửa đổi trực tiếp mã máy (Raw Opcode Patching)** của `steamclient64.dll` trong RAM bằng `VirtualProtect(..., PAGE_EXECUTE_READWRITE)`:
 
 | Cơ chế bảo vệ của Steam | Chuỗi tham chiếu (String Xref) trong `steamclient64.dll` | Kỹ thuật Vá Mã Máy (Binary Patch / Detour) của DLL |
@@ -467,4 +489,3 @@ Bộ 04 tệp DLL (`dwmapi.dll`, `xinput1_4.dll`, `OpenSteamTool.dll`, `cloud_re
 2. **Tự động tái sinh tiến trình ngầm** (`DCGaming.RuntimeUpdater.exe`) mỗi khi người dùng mở Steam, ngay cả khi đã gỡ hoặc tắt Launcher chính.
 3. **Can thiệp toàn diện vào không gian bộ nhớ của `steam.exe`**, từ tầng giao diện (`steamui.dll`), tầng logic khách (`steamclient64.dll`) cho tới tầng hệ thống tệp tin (`ntdll.dll`), nhằm giả mạo bản quyền, giải mã dữ liệu Depot trái phép, đánh lừa DRM Denuvo, vượt khóa Family Sharing / Family View và tiêm DLL vào tiến trình trò chơi.
 4. **Lạm dụng tài khoản Steam hợp pháp của người dùng (`ManifestDonor`)** để âm thầm thu thập danh sách game bản quyền và tạo mã tải `ManifestRequestCode` phục vụ cho hệ thống máy chủ phát tán game lậu (`manifest.luastools.xyz`).
-
